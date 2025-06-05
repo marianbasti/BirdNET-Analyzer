@@ -48,11 +48,12 @@ class UnlabeledAudioDataset(Dataset):
             waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
         if waveform.ndim > 1:
             waveform = waveform[0]  # mono
-        # Random crop between min_len and max_len seconds
+        # Random crop between min_len and max_len seconds only if audio >= 50s
         total_len = waveform.shape[-1]
         min_samples = int(self.min_len * self.sample_rate)
         max_samples = int(self.max_len * self.sample_rate)
-        if total_len > max_samples:
+        min_crop_samples = int(50 * self.sample_rate)
+        if total_len >= min_crop_samples and total_len > max_samples:
             start = random.randint(0, total_len - max_samples)
             waveform = waveform[start:start+max_samples]
         elif total_len < min_samples:
@@ -134,6 +135,20 @@ class SimCLRPretrainer:
         x = self.proj_head(x)
         return x
 
+    def save_for_visualization(self, save_path='pretrained_for_viz.pt'):
+        """Save the complete pretraining state including spec layer for visualization."""
+        torch.save({
+            'spec_layer': self.spec_layer.state_dict(),
+            'backbone': self.backbone.state_dict(),
+            'proj_head': self.proj_head.state_dict(),
+            'config': {
+                'emb_size': 1024,  # Assuming default
+                'spec_shape': (96, 511),
+                'proj_dim': 128
+            }
+        }, save_path)
+        print(f"Complete pretraining state saved to {save_path}")
+
     def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False):
         import os
         from tqdm import tqdm
@@ -198,7 +213,14 @@ class SimCLRPretrainer:
                 }, f"checkpoint_pretrain_epoch{epoch+1}.pt")
         # Save backbone weights
         torch.save(self.backbone.state_dict(), save_path)
+        
+        # Also save complete state for visualization
+        viz_path = save_path.replace('.pt', '_complete.pt')
+        self.save_for_visualization(viz_path)
+        
         print(f"Pretraining complete. Backbone saved to {save_path}")
+        print(f"Complete state for visualization saved to {viz_path}")
         if self.log_wandb:
             import wandb
             wandb.save(save_path)
+            wandb.save(viz_path)

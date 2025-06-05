@@ -46,6 +46,25 @@ If you do, please cite as:
 
 You can access documentation for this project [here](https://birdnet-team.github.io/BirdNET-Analyzer/).
 
+
+## Pytorch implementation
+
+The model has been reimplemented in PyTorch. In order to use it, you can do so by installing the required modules and running the following commands:
+
+### Installing dependencies
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
+pip install -r requirements.txt
+``` 
+
+### Running the web interface
+```bash
+python -m birdnet_analyzer.torch_gradio
+```
+
+This will start a web interface on your local machine, which you can access via `http://localhost:7860`.
+
 ## Download
 
 You can download installers for Windows and macOS from the [releases page](https://github.com/birdnet-team/BirdNET-Analyzer/releases/latest).

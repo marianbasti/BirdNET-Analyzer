@@ -1,85 +1,7 @@
+import logging
 from sklearn.manifold import TSNE
-def tsne_visualization_interface(data_dir, model_path, n_samples=500):
-    import torch
-    import torchaudio
-    from birdnet_analyzer.torch_model import EfficientNetBackbone, BirdNETMelSpecLayer
-    import os
-    # Scan subdirectories for classes
-    if not os.path.isdir(data_dir):
-        return {"error": "Por favor, proporciona una ruta de directorio válida."}
-    class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
-    if not class_names:
-        return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
-    # Load model backbone
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    try:
-        backbone = EfficientNetBackbone(1, 1024).to(device)
-        state = torch.load(model_path, map_location=device)
-        backbone.load_state_dict(state)
-        backbone.eval()
-    except Exception as e:
-        return {"error": f"Error al cargar el backbone: {e}"}
-    # Collect audio files and labels
-    audio_paths = []
-    labels = []
-    for idx, cls in enumerate(class_names):
-        cls_dir = os.path.join(data_dir, cls)
-        for fname in os.listdir(cls_dir):
-            if fname.lower().endswith((".wav", ".flac", ".mp3", ".ogg")):
-                audio_paths.append(os.path.join(cls_dir, fname))
-                labels.append(idx)
-    if not audio_paths:
-        return {"error": "No se encontraron archivos de audio en los subdirectorios de clase."}
-    # Subsample for visualization
-    if len(audio_paths) > n_samples:
-        import numpy as np
-        idxs = np.random.choice(len(audio_paths), n_samples, replace=False)
-        audio_paths = [audio_paths[i] for i in idxs]
-        labels = [labels[i] for i in idxs]
-    # Extract features
-    features = []
-    y_labels = []
-    spec_layer = BirdNETMelSpecLayer().to(device)
-    for path, label in zip(audio_paths, labels):
-        try:
-            waveform, sr = torchaudio.load(path)
-            if sr != 48000:
-                waveform = torchaudio.functional.resample(waveform, sr, 48000)
-            if waveform.ndim > 1:
-                waveform = waveform[0]
-            waveform = waveform.unsqueeze(0).to(device)
-            with torch.no_grad():
-                spec = spec_layer(waveform)
-                emb = backbone(spec)
-                features.append(emb.cpu().numpy()[0])
-                y_labels.append(label)
-        except Exception:
-            continue
-    if not features:
-        return {"error": "No se extrajeron características."}
-    import numpy as np
-    features = np.stack(features)
-    y_labels = np.array(y_labels)
-    # t-SNE
-    tsne = TSNE(n_components=2, random_state=42, init='pca')
-    embedding = tsne.fit_transform(features)
-    # Plot
-    import matplotlib.pyplot as plt
-    import io
-    import PIL.Image
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for idx, cname in enumerate(class_names):
-        mask = y_labels == idx
-        ax.scatter(embedding[mask, 0], embedding[mask, 1], label=cname, alpha=0.7, s=20)
-    ax.legend(markerscale=2, bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax.set_title('Proyección t-SNE de las características de la red')
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close(fig)
-    buf.seek(0)
-    img = PIL.Image.open(buf)
-    return img
+
+
 def classify_interface(audio_dir, model_path, window_size_sec, hop_size_sec, threshold=0.5):
     import os
     import torch
@@ -174,19 +96,20 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
     import os
     from torch.utils.data import DataLoader
 
+    # Debug: print the received data_dir
+    print(f"[DEBUG] pretrain_interface received data_dir: '{data_dir}'")
 
-
-    if not os.path.isdir(data_dir):
-        return {"error": "Por favor, proporciona una ruta de directorio válida."}
+    if not data_dir or not os.path.isdir(data_dir):
+        return {"error": f"Por favor, proporciona una ruta de directorio válida. Recibido: '{data_dir}'"}
     try:
         dataset = UnlabeledAudioDataset(data_dir)
         if len(dataset) == 0:
-            return {"error": "No se encontraron archivos de audio en el directorio proporcionado."}
+            return {"error": f"No se encontraron archivos de audio en el directorio proporcionado: '{data_dir}'"}
         dataloader = DataLoader(dataset, batch_size=int(batch_size), shuffle=True, collate_fn=collate_fn)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         pretrainer = SimCLRPretrainer(device=device)
         # Handle output_dir
-        if output_dir is not None:
+        if output_dir is not None and output_dir != "":
             os.makedirs(output_dir, exist_ok=True)
             save_path = os.path.join(output_dir, 'pretrained_backbone.pt')
             checkpoint_prefix = os.path.join(output_dir, 'checkpoint_pretrain_epoch')
@@ -198,9 +121,10 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
             pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs), checkpoint_prefix=checkpoint_prefix)
         except TypeError:
             pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
-    
     except Exception as e:
-        return {"error": f"Error en el preentrenamiento: {e}"}
+        import traceback
+        tb = traceback.format_exc()
+        return {"error": f"Error en el preentrenamiento: {e}\nTraceback:\n{tb}"}
 
 # Pad or truncate waveform to fixed length (1 minute = 2,880,000 samples at 48kHz)
 def pad_or_truncate(waveform, target_length=2880000):
@@ -377,26 +301,60 @@ def eval_interface(data_dir, model_path):
     return results
 
 # --- UMAP Visualization Tab ---
-def umap_visualization_interface(data_dir, model_path, n_samples=500):
+# Global cache for extracted features to avoid recomputation when only changing visualization parameters
+_feature_cache = {}
+
+def extract_features_cached(data_dir, model_path, n_samples=500):
+    """Extract and cache features to avoid recomputation when only changing visualization parameters."""
     import torch
     import torchaudio
     from birdnet_analyzer.torch_model import EfficientNetBackbone, BirdNETMelSpecLayer
     import os
-    # Scan subdirectories for classes
+    import numpy as np
+    
+    # Create cache key
+    cache_key = f"{data_dir}_{model_path}_{n_samples}"
+    
+    # Return cached result if available
+    if cache_key in _feature_cache:
+        return _feature_cache[cache_key]
+    
+    logging.basicConfig(level=logging.DEBUG)
+    logger = logging.getLogger("feature_extraction")
+
+    logger.debug(f"Extracting features for: {data_dir}")
     if not os.path.isdir(data_dir):
         return {"error": "Por favor, proporciona una ruta de directorio válida."}
+    
     class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
     if not class_names:
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
-    # Load model backbone
+    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Load model components
     try:
-        backbone = EfficientNetBackbone(1, 1024).to(device)
+        logger.debug(f"Loading model components from {model_path}")
         state = torch.load(model_path, map_location=device)
-        backbone.load_state_dict(state)
+        
+        spec_layer = BirdNETMelSpecLayer().to(device)
+        spec_layer.eval()
+        
+        backbone = EfficientNetBackbone(2, 1024).to(device)
+        
+        if 'backbone.stem.0.weight' in state:
+            backbone_state = {k.replace('backbone.', ''): v for k, v in state.items() if k.startswith('backbone.')}
+            backbone.load_state_dict(backbone_state, strict=True)
+        elif 'stem.0.weight' in state:
+            backbone.load_state_dict(state, strict=True)
+        else:
+            backbone.load_state_dict(state, strict=False)
+            
         backbone.eval()
+        logger.debug("Model components loaded successfully")
     except Exception as e:
-        return {"error": f"Error al cargar el backbone: {e}"}
+        return {"error": f"Error al cargar el modelo: {e}"}
+
     # Collect audio paths and labels
     audio_paths = []
     labels = []
@@ -406,54 +364,223 @@ def umap_visualization_interface(data_dir, model_path, n_samples=500):
             if fname.lower().endswith((".wav", ".flac", ".mp3", ".ogg")):
                 audio_paths.append(os.path.join(cls_dir, fname))
                 labels.append(idx)
+    
     if not audio_paths:
         return {"error": "No se encontraron archivos de audio en los subdirectorios de clase."}
+    
     # Subsample for visualization
     if len(audio_paths) > n_samples:
+        import numpy as np
         idxs = np.random.choice(len(audio_paths), n_samples, replace=False)
         audio_paths = [audio_paths[i] for i in idxs]
         labels = [labels[i] for i in idxs]
+
     # Extract features
     features = []
     y_labels = []
-    spec_layer = BirdNETMelSpecLayer().to(device)
-    for path, label in zip(audio_paths, labels):
-        try:
-            waveform, sr = torchaudio.load(path)
-            if sr != 48000:
-                waveform = torchaudio.functional.resample(waveform, sr, 48000)
-            if waveform.ndim > 1:
-                waveform = waveform[0]
-            waveform = waveform.unsqueeze(0).to(device)
-            with torch.no_grad():
+    
+    with torch.no_grad():
+        for path, label in zip(audio_paths, labels):
+            try:
+                waveform, sr = torchaudio.load(path)
+                if sr != 48000:
+                    waveform = torchaudio.functional.resample(waveform, sr, 48000)
+                if waveform.ndim > 1:
+                    waveform = waveform[0]
+                waveform = pad_or_truncate(waveform, 2880000)
+                waveform = waveform.unsqueeze(0).to(device)
+                
                 spec = spec_layer(waveform)
                 emb = backbone(spec)
-                features.append(emb.cpu().numpy()[0])
+                emb_normalized = torch.nn.functional.normalize(emb, dim=1)
+                
+                features.append(emb_normalized.cpu().numpy()[0])
                 y_labels.append(label)
-        except Exception:
-            continue
+            except Exception as e:
+                logger.warning(f"Failed to process {path}: {e}")
+                continue
+    
     if not features:
         return {"error": "No se extrajeron características."}
+    
+    import numpy as np
     features = np.stack(features)
     y_labels = np.array(y_labels)
-    # UMAP
-    reducer = umap.UMAP(n_components=2, random_state=42)
-    embedding = reducer.fit_transform(features)
-    # Plot
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for idx, cname in enumerate(class_names):
-        mask = y_labels == idx
-        ax.scatter(embedding[mask, 0], embedding[mask, 1], label=cname, alpha=0.7, s=20)
-    ax.legend(markerscale=2, bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax.set_title('Proyección UMAP de las características de la red')
-    plt.tight_layout()
+    
+    # Handle NaN/Inf values
+    if np.any(np.isnan(features)) or np.any(np.isinf(features)):
+        valid_mask = ~(np.isnan(features).any(axis=1) | np.isinf(features).any(axis=1))
+        features = features[valid_mask]
+        y_labels = y_labels[valid_mask]
+    
+    # Standardization
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+    
+    # Cache the result
+    result = {
+        "features": features_scaled,
+        "labels": y_labels,
+        "class_names": class_names,
+        "success": True
+    }
+    _feature_cache[cache_key] = result
+    
+    logger.debug(f"Features extracted and cached: {features_scaled.shape}")
+    return result
+
+def create_umap_plot(features, labels, class_names, n_neighbors=15, min_dist=0.1, metric='cosine'):
+    """Create UMAP plot with given parameters."""
+    import umap
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import io
     import PIL.Image
+    
+    try:
+        reducer = umap.UMAP(
+            n_components=2, 
+            random_state=42,
+            n_neighbors=int(n_neighbors),
+            min_dist=float(min_dist),
+            metric=metric
+        )
+        embedding = reducer.fit_transform(features)
+    except Exception as e:
+        return None, f"UMAP error: {e}"
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(class_names)))
+    
+    for idx, cname in enumerate(class_names):
+        mask = labels == idx
+        if np.any(mask):
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], 
+                      label=cname, alpha=0.7, s=30, c=[colors[idx]])
+    
+    ax.legend(markerscale=1.5, bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.set_title(f'UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, metric={metric})', fontsize=14)
+    ax.set_xlabel('UMAP 1', fontsize=12)
+    ax.set_ylabel('UMAP 2', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     img = PIL.Image.open(buf)
+    return img, None
+
+def create_tsne_plot(features, labels, class_names, perplexity=30, n_iter=1000, metric='cosine'):
+    """Create t-SNE plot with given parameters."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import io
+    import PIL.Image
+    from sklearn.manifold import TSNE
+    
+    try:
+        tsne = TSNE(
+            n_components=2, 
+            random_state=42, 
+            init='pca',
+            perplexity=min(int(perplexity), len(features)//4),
+            n_iter=int(n_iter),
+            metric=metric
+        )
+        embedding = tsne.fit_transform(features)
+    except Exception as e:
+        return None, f"t-SNE error: {e}"
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(class_names)))
+    
+    for idx, cname in enumerate(class_names):
+        mask = labels == idx
+        if np.any(mask):
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], 
+                      label=cname, alpha=0.7, s=30, c=[colors[idx]])
+    
+    ax.legend(markerscale=1.5, bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.set_title(f't-SNE (perplexity={perplexity}, n_iter={n_iter}, metric={metric})', fontsize=14)
+    ax.set_xlabel('t-SNE 1', fontsize=12)
+    ax.set_ylabel('t-SNE 2', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    img = PIL.Image.open(buf)
+    return img, None
+
+def update_umap_plot(data_dir, model_path, n_samples, n_neighbors, min_dist, metric):
+    """Update UMAP plot with new parameters."""
+    feature_data = extract_features_cached(data_dir, model_path, int(n_samples))
+    
+    if "error" in feature_data:
+        return None
+    
+    if not feature_data.get("success", False):
+        return None
+        
+    img, error = create_umap_plot(
+        feature_data["features"], 
+        feature_data["labels"], 
+        feature_data["class_names"],
+        n_neighbors, min_dist, metric
+    )
+    
     return img
+
+def update_tsne_plot(data_dir, model_path, n_samples, perplexity, n_iter, metric):
+    """Update t-SNE plot with new parameters."""
+    feature_data = extract_features_cached(data_dir, model_path, int(n_samples))
+    
+    if "error" in feature_data:
+        return None
+    
+    if not feature_data.get("success", False):
+        return None
+        
+    img, error = create_tsne_plot(
+        feature_data["features"], 
+        feature_data["labels"], 
+        feature_data["class_names"],
+        perplexity, n_iter, metric
+    )
+    
+    return img
+
+# Keep original functions for backward compatibility
+def umap_visualization_interface(data_dir, model_path, n_samples=500):
+    feature_data = extract_features_cached(data_dir, model_path, n_samples)
+    if "error" in feature_data:
+        return feature_data
+    
+    img, error = create_umap_plot(
+        feature_data["features"], 
+        feature_data["labels"], 
+        feature_data["class_names"]
+    )
+    return img if img else {"error": error}
+
+def tsne_visualization_interface(data_dir, model_path, n_samples=500):
+    feature_data = extract_features_cached(data_dir, model_path, n_samples)
+    if "error" in feature_data:
+        return feature_data
+    
+    img, error = create_tsne_plot(
+        feature_data["features"], 
+        feature_data["labels"], 
+        feature_data["class_names"]
+    )
+    return img if img else {"error": error}
 
 with gr.Blocks() as demo:
     gr.Markdown("# Clasificador de Audio BirdNet (PyTorch)")
@@ -618,41 +745,129 @@ with gr.Blocks() as demo:
  
         with gr.TabItem("Visualización de Características"):
             gr.Markdown("## Visualización de Características (UMAP & t-SNE)")
-            gr.Markdown("Visualice las características de la red colapsadas en 2D con UMAP y t-SNE. Seleccione un directorio de datos etiquetados y un backbone preentrenado.")
+            gr.Markdown("Visualice las características de la red colapsadas en 2D con UMAP y t-SNE. Seleccione un directorio de datos etiquetados y un backbone preentrenado. Use los sliders para ajustar los parámetros de visualización en tiempo real.")
+            
             with gr.Row():
-                vis_data_dir = gr.Textbox(
-                    label="Directorio de Datos Etiquetados",
-                    placeholder="/ruta/a/directorio_datos",
-                    info="Directorio con subcarpetas para cada clase, cada una con archivos de audio"
+                with gr.Column(scale=1):
+                    vis_data_dir = gr.Textbox(
+                        label="Directorio de Datos Etiquetados",
+                        placeholder="/ruta/a/directorio_datos",
+                        info="Directorio con subcarpetas para cada clase, cada una con archivos de audio"
+                    )
+                    vis_model_path = gr.Textbox(
+                        label="Ruta del Modelo Backbone",
+                        placeholder="pretrained_backbone.pt",
+                        info="Ruta al archivo del backbone preentrenado"
+                    )
+                    vis_n_samples = gr.Slider(
+                        minimum=50, maximum=2000, step=50, value=500,
+                        label="Número de Muestras",
+                        info="Cantidad máxima de muestras a visualizar"
+                    )
+                    
+                    extract_btn = gr.Button("Extraer Características", variant="primary")
+                    clear_cache_btn = gr.Button("Limpiar Caché", variant="secondary")
+                    
+                    gr.Markdown("### Parámetros UMAP")
+                    umap_n_neighbors = gr.Slider(
+                        minimum=2, maximum=100, step=1, value=15,
+                        label="N Neighbors",
+                        info="Número de vecinos considerados en el análisis local"
+                    )
+                    umap_min_dist = gr.Slider(
+                        minimum=0.0, maximum=1.0, step=0.01, value=0.1,
+                        label="Min Distance",
+                        info="Distancia mínima entre puntos en el espacio embebido"
+                    )
+                    umap_metric = gr.Dropdown(
+                        choices=["cosine", "euclidean", "manhattan", "chebyshev"],
+                        value="cosine",
+                        label="Métrica de Distancia",
+                        info="Métrica utilizada para calcular distancias"
+                    )
+                    
+                    gr.Markdown("### Parámetros t-SNE")
+                    tsne_perplexity = gr.Slider(
+                        minimum=5, maximum=100, step=1, value=30,
+                        label="Perplexity",
+                        info="Balance entre estructura local y global"
+                    )
+                    tsne_n_iter = gr.Slider(
+                        minimum=250, maximum=2000, step=250, value=1000,
+                        label="Iteraciones",
+                        info="Número máximo de iteraciones para optimización"
+                    )
+                    tsne_metric = gr.Dropdown(
+                        choices=["cosine", "euclidean", "manhattan", "chebyshev"],
+                        value="cosine",
+                        label="Métrica de Distancia",
+                        info="Métrica utilizada para calcular distancias"
+                    )
+                
+                with gr.Column(scale=2):
+                    with gr.Row():
+                        umap_img = gr.Image(type="pil", label="Gráfico UMAP")
+                        tsne_img = gr.Image(type="pil", label="Gráfico t-SNE")
+                    
+                    extraction_status = gr.Textbox(
+                        label="Estado de Extracción", 
+                        interactive=False,
+                        value="Presiona 'Extraer Características' para comenzar"
+                    )
+            
+            # Event handlers
+            def extract_features_handler(data_dir, model_path, n_samples):
+                if not data_dir or not model_path:
+                    return "Error: Proporciona directorio de datos y ruta del modelo", None, None
+                
+                result = extract_features_cached(data_dir, model_path, int(n_samples))
+                
+                if "error" in result:
+                    return f"Error: {result['error']}", None, None
+                
+                # Generate initial plots
+                umap_img, _ = create_umap_plot(
+                    result["features"], result["labels"], result["class_names"]
                 )
-                vis_model_path = gr.Textbox(
-                    label="Ruta del Modelo Backbone",
-                    placeholder="pretrained_backbone.pt",
-                    info="Ruta al archivo del backbone preentrenado"
+                tsne_img, _ = create_tsne_plot(
+                    result["features"], result["labels"], result["class_names"]
                 )
-                vis_n_samples = gr.Number(
-                    label="Número de Muestras",
-                    value=500,
-                    info="Cantidad máxima de muestras a visualizar"
+                
+                return f"Características extraídas exitosamente: {result['features'].shape[0]} muestras, {len(result['class_names'])} clases", umap_img, tsne_img
+            
+            def clear_cache_handler():
+                global _feature_cache
+                _feature_cache.clear()
+                return "Caché limpiado", None, None
+            
+            # Extract features button
+            extract_btn.click(
+                extract_features_handler,
+                inputs=[vis_data_dir, vis_model_path, vis_n_samples],
+                outputs=[extraction_status, umap_img, tsne_img]
+            )
+            
+            # Clear cache button
+            clear_cache_btn.click(
+                clear_cache_handler,
+                outputs=[extraction_status, umap_img, tsne_img]
+            )
+            
+            # UMAP parameter updates
+            for component in [umap_n_neighbors, umap_min_dist, umap_metric]:
+                component.change(
+                    update_umap_plot,
+                    inputs=[vis_data_dir, vis_model_path, vis_n_samples, umap_n_neighbors, umap_min_dist, umap_metric],
+                    outputs=umap_img
                 )
-            with gr.Row():
-                umap_btn = gr.Button("Ejecutar Visualización UMAP")
-                tsne_btn = gr.Button("Ejecutar Visualización t-SNE")
-            with gr.Row():
-                umap_img = gr.Image(type="pil", label="Gráfico UMAP")
-                tsne_img = gr.Image(type="pil", label="Gráfico t-SNE")
-            def _umap_vis(data_dir, model_path, n_samples):
-                result = umap_visualization_interface(data_dir, model_path, int(n_samples))
-                if isinstance(result, dict) and "error" in result:
-                    return None
-                return result
-            def _tsne_vis(data_dir, model_path, n_samples):
-                result = tsne_visualization_interface(data_dir, model_path, int(n_samples))
-                if isinstance(result, dict) and "error" in result:
-                    return None
-                return result
-            umap_btn.click(_umap_vis, inputs=[vis_data_dir, vis_model_path, vis_n_samples], outputs=umap_img)
-            tsne_btn.click(_tsne_vis, inputs=[vis_data_dir, vis_model_path, vis_n_samples], outputs=tsne_img)
+            
+            # t-SNE parameter updates  
+            for component in [tsne_perplexity, tsne_n_iter, tsne_metric]:
+                component.change(
+                    update_tsne_plot,
+                    inputs=[vis_data_dir, vis_model_path, vis_n_samples, tsne_perplexity, tsne_n_iter, tsne_metric],
+                    outputs=tsne_img
+                )
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0")
