@@ -869,5 +869,16 @@ with gr.Blocks() as demo:
                     outputs=tsne_img
                 )
 
+# --- Fix for torchaudio backend on Windows ---
+import sys
+import platform
+if platform.system() == "Windows":
+    try:
+        import torchaudio
+        torchaudio.set_audio_backend("soundfile")
+    except Exception as e:
+        print("[ERROR] No se pudo establecer el backend 'soundfile' para torchaudio. Instala la librería 'soundfile' con 'pip install soundfile'.")
+        raise e
+
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0")

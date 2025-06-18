@@ -1,3 +1,14 @@
+# --- Fix for torchaudio backend on Windows ---
+import sys
+import platform
+if platform.system() == "Windows":
+    try:
+        import torchaudio
+        torchaudio.set_audio_backend("soundfile")
+    except Exception as e:
+        print("[ERROR] No se pudo establecer el backend 'soundfile' para torchaudio. Instala la librería 'soundfile' con 'pip install soundfile'.")
+        raise e
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -149,7 +160,7 @@ class SimCLRPretrainer:
         }, save_path)
         print(f"Complete pretraining state saved to {save_path}")
 
-    def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False):
+    def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False, checkpoint_prefix=None):
         import os
         from tqdm import tqdm
         scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
@@ -204,13 +215,14 @@ class SimCLRPretrainer:
                 wandb.log({"pretrain_loss": avg_loss, "epoch": epoch+1})
             # Save checkpoint
             if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+                ckpt_name = f"{checkpoint_prefix}{epoch+1}.pt" if checkpoint_prefix else f"checkpoint_pretrain_epoch{epoch+1}.pt"
                 torch.save({
                     'spec_layer': self.spec_layer.state_dict(),
                     'backbone': self.backbone.state_dict(),
                     'proj_head': self.proj_head.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch
-                }, f"checkpoint_pretrain_epoch{epoch+1}.pt")
+                }, ckpt_name)
         # Save backbone weights
         torch.save(self.backbone.state_dict(), save_path)
         
