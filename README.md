@@ -24,29 +24,6 @@
 
 </div>
 
-Este repositorio contiene scripts de BirdNET para procesar grandes cantidades de datos de audio o archivos de audio individuales.
-Esta es la versión más avanzada de BirdNET para análisis acústicos y mantendremos este repositorio actualizado con nuevos modelos e interfaces mejoradas para permitir que científicos sin experiencia en informática puedan ejecutar el análisis.
-
-Siéntete libre de usar BirdNET para tus análisis acústicos e investigaciones.
-Si lo haces, por favor cita como:
-
-```bibtex
-@article{kahl2021birdnet,
-  title={BirdNET: A deep learning solution for avian diversity monitoring},
-  author={Kahl, Stefan and Wood, Connor M and Eibl, Maximilian and Klinck, Holger},
-  journal={Ecological Informatics},
-  volume={61},
-  pages={101236},
-  year={2021},
-  publisher={Elsevier}
-}
-```
-
-## Documentación
-
-Puedes acceder a la documentación de este proyecto [aquí](https://birdnet-team.github.io/BirdNET-Analyzer/).
-
-
 ## Implementación en Pytorch
 
 El modelo ha sido reimplementado en PyTorch. Para usarlo, puedes hacerlo instalando los módulos requeridos y ejecutando los siguientes comandos:
@@ -65,19 +42,6 @@ python -m birdnet_analyzer.torch_gradio
 
 Esto iniciará una interfaz web en tu máquina local, a la que puedes acceder vía `http://localhost:7860`.
 
-## Descarga
-
-Puedes descargar instaladores para Windows y macOS desde la [página de lanzamientos](https://github.com/birdnet-team/BirdNET-Analyzer/releases/latest).
-Los modelos se pueden encontrar en [Zenodo](https://zenodo.org/records/15050749).
-
-## Acerca de
-
-Desarrollado por el [K. Lisa Yang Center for Conservation Bioacoustics](https://www.birds.cornell.edu/ccb/) en el [Cornell Lab of Ornithology](https://www.birds.cornell.edu/home) en colaboración con la [Universidad Técnica de Chemnitz](https://www.tu-chemnitz.de/index.html.en).
-
-Visita https://birdnet.cornell.edu para saber más sobre el proyecto.
-
-¿Quieres usar BirdNET para analizar un gran conjunto de datos? No dudes en contactarnos: ccb-birdnet@cornell.edu
-
 **¿Tienes una pregunta, comentario o solicitud de función? Por favor, inicia un nuevo hilo de issue para hacérnoslo saber. Siéntete libre de enviar un pull request.**
 
 ## Licencia
@@ -89,19 +53,12 @@ Por favor, asegúrate de revisar y cumplir con los términos específicos de la 
 
 *Ten en cuenta que todos los propósitos educativos y de investigación se consideran uso no comercial y, por lo tanto, está permitido usar los modelos BirdNET de cualquier manera.*
 
-## Financiación
-
-Este proyecto es apoyado por Jake Holshuh (Cornell clase del ´69) y The Arthur Vining Davis Foundations.
-Nuestro trabajo en el K. Lisa Yang Center for Conservation Bioacoustics es posible gracias a la generosidad de K. Lisa Yang para avanzar en tecnologías innovadoras de conservación que inspiren e informen la conservación de la vida silvestre y los hábitats.
-
-El desarrollo de BirdNET está apoyado por el Ministerio Federal Alemán de Educación e Investigación a través del proyecto “BirdNET+” (FKZ 01|S22072).
-El Ministerio Federal Alemán de Medio Ambiente, Conservación de la Naturaleza y Seguridad Nuclear contribuye a través del proyecto “DeepBirdDetect” (FKZ 67KI31040E).
-Además, la Deutsche Bundesstiftung Umwelt apoya BirdNET a través del proyecto “RangerSound” (proyecto 39263/01).
-
 ## Socios
 
 BirdNET es un esfuerzo conjunto de socios de la academia y la industria.
 Sin estas alianzas, este proyecto no habría sido posible.
-¡Gracias!
 
-![Logos de todos los socios](https://tuc.cloud/index.php/s/KSdWfX5CnSRpRgQ/download/box_logos.png)
+
+## Cita
+
+Desarrollado por el [K. Lisa Yang Center for Conservation Bioacoustics](https://www.birds.cornell.edu/ccb/) en el [Cornell Lab of Ornithology](https://www.birds.cornell.edu/home) en colaboración con la [Universidad Técnica de Chemnitz](https://www.tu-chemnitz.de/index.html.en).
