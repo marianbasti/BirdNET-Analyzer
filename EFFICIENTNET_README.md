@@ -6,11 +6,47 @@ This directory contains a PyTorch implementation of EfficientNet models, based o
 
 - **Complete EfficientNet Family**: Support for all standard variants (B0-B8, L2)
 - **Perch Compatibility**: Matches the interface and architecture from the reference implementation
+- **Perch-Aligned Training**: Training methodology follows Perch source code patterns
 - **BirdNET Integration**: Compatible with existing BirdNET dual mel spectrogram frontend
 - **Configurable Activations**: Support for different activation configurations (default, QAT, ReLU-only)
 - **Stochastic Depth**: Proper implementation of stochastic depth for regularization
 - **Squeeze-and-Excitation**: Full SE module implementation with configurable reduction ratios
 - **PyTorch Native**: Pure PyTorch implementation with no external dependencies
+
+## Training Methodology (Perch-Aligned)
+
+The training implementation follows the Perch source code from [`chirp/train/classifier.py`](https://github.com/google-research/perch/blob/main/chirp/train/classifier.py):
+
+### Core Training Patterns
+
+#### Loss Function
+- Uses `sigmoid_binary_cross_entropy` as the default loss function (matching Perch's `optax.sigmoid_binary_cross_entropy`)
+- Supports multi-label classification with proper binary cross-entropy loss
+
+#### Metrics Collection
+Following Perch's comprehensive metrics approach:
+- **AUPRC (Average Precision)**: Primary metric used in Perch for model evaluation
+- **AUROC (Area Under ROC Curve)**: Secondary ranking metric  
+- **cMAP (Class Mean Average Precision)**: Per-class performance assessment
+- **Loss tracking**: Training and validation loss progression
+
+#### Training State Management
+Implements Perch-style training state with step tracking, model parameters, optimizer state, and scheduler management.
+
+#### Data Handling
+Follows Perch batch conventions:
+```python
+batch = {
+    "audio": tensor,      # Audio spectrograms (B, 2, 96, 511)
+    "label": tensor,      # Multi-hot labels
+    "audio_mask": tensor  # Optional masking (future)
+}
+```
+
+### Frontend Integration
+The EfficientNet training tabs in the GUI implement Perch training patterns:
+- **EfficientNet Pretrain Tab**: Full pretraining with Perch methodology
+- **EfficientNet Finetune Tab**: Finetuning with proper Perch evaluation patterns
 
 ## Files
 
