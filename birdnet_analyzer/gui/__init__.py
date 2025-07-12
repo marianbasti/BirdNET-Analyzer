@@ -3,13 +3,15 @@ def main():
     import birdnet_analyzer.gui.segments as gs
     import birdnet_analyzer.gui.single_file as sfa
     import birdnet_analyzer.gui.utils as gu
-    from birdnet_analyzer.gui import embeddings, evaluation, review, species, train
+    from birdnet_analyzer.gui import embeddings, evaluation, review, species, train, efficientnet_train
 
     gu.open_window(
         [
             sfa.build_single_analysis_tab,
             mfa.build_multi_analysis_tab,
             train.build_train_tab,
+            efficientnet_train.build_efficientnet_pretrain_tab,
+            efficientnet_train.build_efficientnet_finetune_tab,
             gs.build_segments_tab,
             review.build_review_tab,
             species.build_species_tab,

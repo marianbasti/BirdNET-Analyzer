@@ -3,6 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 
+# Import EfficientNet implementation for compatibility
+try:
+    from .efficientnet import EfficientNet, EfficientNetModel, create_efficientnet
+except ImportError:
+    # Fallback if efficientnet module is not available
+    EfficientNet = None
+    EfficientNetModel = None
+    create_efficientnet = None
+
 class BirdNETMelSpecLayer(nn.Module):
     """
     Computes two mel spectrograms as in BirdNET V2.4 and concatenates them as channels.
@@ -159,3 +168,65 @@ class BirdNetTorchModel(nn.Module):
                 raise
 
 # Training and inference utilities would be implemented here as well.
+
+class BirdNetEfficientNet(nn.Module):
+    """BirdNET model using EfficientNet backbone.
+    
+    This class integrates the EfficientNet implementation with the existing
+    BirdNET mel spectrogram frontend for audio analysis.
+    
+    Args:
+        model_variant: EfficientNet model variant (e.g., EfficientNetModel.B0)
+        num_classes: Number of bird species classes
+        spec_shape: Shape of mel spectrogram (height, width)
+        use_pretrained_backbone: Whether to use pretrained EfficientNet weights
+    
+    Example:
+        >>> if EfficientNet is not None:
+        ...     model = BirdNetEfficientNet(EfficientNetModel.B0, num_classes=1000)
+        ...     audio = torch.randn(4, 48000 * 3)  # 3 seconds of audio
+        ...     predictions = model(audio)
+    """
+    
+    def __init__(self, model_variant, num_classes, spec_shape=(96, 511), use_pretrained_backbone=False):
+        super().__init__()
+        
+        if EfficientNet is None:
+            raise ImportError("EfficientNet module not available. Make sure efficientnet.py is properly imported.")
+        
+        self.spec_layer = BirdNETMelSpecLayer(spec_shape=spec_shape)
+        self.backbone = EfficientNet(
+            model=model_variant,
+            num_classes=num_classes,
+            in_channels=2,  # Dual mel spectrograms
+            include_top=True
+        )
+        
+        if use_pretrained_backbone:
+            # Note: Pretrained weights would be loaded here
+            print("Warning: Pretrained EfficientNet weights are not yet available.")
+    
+    def forward(self, x):
+        """Forward pass through BirdNet with EfficientNet backbone.
+        
+        Args:
+            x: Raw audio tensor of shape (batch_size, samples)
+            
+        Returns:
+            Classification logits of shape (batch_size, num_classes)
+        """
+        try:
+            # Convert audio to mel spectrograms
+            x = self.spec_layer(x)  # (B, 2, 96, 511)
+            # Run through EfficientNet backbone
+            x = self.backbone(x)
+            return x
+        except RuntimeError as e:
+            import torch
+            if 'out of memory' in str(e).lower():
+                print("[ERROR] CUDA out of memory. Emptying cache.")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                raise RuntimeError("CUDA out of memory. Try reducing batch size or input size.") from e
+            else:
+                raise
