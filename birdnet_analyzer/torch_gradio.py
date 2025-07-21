@@ -88,16 +88,18 @@ import io
 import gradio as gr
 import torch
 import torchaudio
-from birdnet_analyzer.torch_model import BirdNetTorchModel
+from birdnet_analyzer.torch_model import BirdNetTorchModel, WhisperBackbone
 from birdnet_analyzer.torch_pretrain_utils import SimCLRPretrainer, UnlabeledAudioDataset, collate_fn
 
 # Add request: gr.Request to function signature
-def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_epochs=0, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None): # Added request
+def pretrain_interface(
+    data_dir, epochs, batch_size, learning_rate, 
+    save_every_epochs=0, output_dir=None, 
+    use_whisper=False, d_model=512, n_heads=8, n_layers=6,
+    progress=gr.Progress(track_tqdm=True), request: gr.Request = None
+):
     import os
     from torch.utils.data import DataLoader
-
-    # Debug: print the received data_dir
-    print(f"[DEBUG] pretrain_interface received data_dir: '{data_dir}'")
 
     if not data_dir or not os.path.isdir(data_dir):
         return {"error": f"Por favor, proporciona una ruta de directorio válida. Recibido: '{data_dir}'"}
@@ -107,20 +109,46 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
             return {"error": f"No se encontraron archivos de audio en el directorio proporcionado: '{data_dir}'"}
         dataloader = DataLoader(dataset, batch_size=int(batch_size), shuffle=True, collate_fn=collate_fn)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        pretrainer = SimCLRPretrainer(device=device)
+
+        if use_whisper:
+            print("Using Whisper backbone for pretraining.")
+            pretrainer = SimCLRPretrainer(
+                device=device,
+                emb_size=1024, # Standard for now
+                proj_dim=128,
+                n_mels=80,
+                d_model=int(d_model),
+                n_heads=int(n_heads),
+                n_layers=int(n_layers),
+                log_wandb=False,
+                run_name=f"whisper_pretrain_{d_model}d_{n_layers}l"
+            )
+        else:
+            print("Using EfficientNet backbone for pretraining.")
+            # This part needs to be updated if you want to support both.
+            # For now, we assume the old SimCLRPretrainer for EfficientNet is available.
+            # The original code was: SimCLRPretrainer(device=device)
+            # This will fail with the new definition. We will stick to Whisper for now.
+            return {"error": "Only Whisper backbone pretraining is supported in this version of the UI."}
+
         # Handle output_dir
         if output_dir is not None and output_dir != "":
             os.makedirs(output_dir, exist_ok=True)
             save_path = os.path.join(output_dir, 'pretrained_backbone.pt')
-            checkpoint_prefix = os.path.join(output_dir, 'checkpoint_pretrain_epoch')
+            checkpoint_prefix = 'checkpoint_pretrain_epoch' # prefix is handled inside train
         else:
             save_path = 'pretrained_backbone.pt'
             checkpoint_prefix = 'checkpoint_pretrain_epoch'
-        # Try to call with checkpoint_prefix if supported
-        try:
-            pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs), checkpoint_prefix=checkpoint_prefix)
-        except TypeError:
-            pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
+
+        pretrainer.train(
+            dataloader, 
+            epochs=int(epochs), 
+            lr=float(learning_rate), 
+            save_path=save_path, 
+            checkpoint_every=int(save_every_epochs),
+            resume_from=None # Not exposed in UI yet
+        )
+
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -145,6 +173,7 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
     import torch
     from torch.utils.data import DataLoader, Dataset
     from birdnet_analyzer.torch_train_utils import AudioDataset, train_model
+    from birdnet_analyzer.whisper_utils import load_pretrained_whisper_backbone
     import torchaudio
     # Select device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -159,24 +188,25 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
     # Load model
     try:
-        model = BirdNetTorchModel(num_classes=len(class_names))
+        # Try to load as a whisper backbone if model_path is provided
         if model_path is not None:
             try:
-                state = torch.load(model_path, map_location=device)
-                # Try to load as full model first
-                try:
-                    model.load_state_dict(state)
-                except Exception as e:
-                    # If failed, try loading as backbone only
-                    if hasattr(model, 'backbone'):
-                        model.backbone.load_state_dict(state, strict=False)
-                        print("Se cargaron los pesos del backbone para el fine-tuning.")
-                    else:
-                        raise e
+                # Use the new utility to load a model with a pretrained whisper backbone
+                model = load_pretrained_whisper_backbone(
+                    checkpoint_path=model_path.name,
+                    num_classes=len(class_names),
+                    device=device,
+                    freeze_backbone=False # Example: unfreeze for fine-tuning
+                )
+                print("Loaded model with pretrained Whisper backbone.")
             except Exception as e:
-                return {"error": f"Error al cargar el modelo: {e}"}
+                 return {"error": f"Error loading Whisper backbone: {e}"}
+        else:
+            # Fallback to creating a new model (you might want to specify architecture here)
+            model = BirdNetTorchModel(num_classes=len(class_names))
+
         model = model.to(device)
-        model.eval()
+
     except Exception as e:
         return {"error": f"Error al cargar el modelo: {e}"}
     # Collect all audio files and their labels
@@ -308,7 +338,7 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
     """Extract and cache features to avoid recomputation when only changing visualization parameters."""
     import torch
     import torchaudio
-    from birdnet_analyzer.torch_model import EfficientNetBackbone, BirdNETMelSpecLayer
+    from birdnet_analyzer.torch_model import WhisperBackbone, BirdNETMelSpecLayer
     import os
     import numpy as np
     
@@ -319,7 +349,7 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
     if cache_key in _feature_cache:
         return _feature_cache[cache_key]
     
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("feature_extraction")
 
     logger.debug(f"Extracting features for: {data_dir}")
@@ -337,22 +367,42 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
         logger.debug(f"Loading model components from {model_path}")
         state = torch.load(model_path, map_location=device)
         
-        spec_layer = BirdNETMelSpecLayer().to(device)
+        # Check for config to decide which model to load
+        config = state.get('config', {})
+        is_whisper = 'd_model' in config or 'n_mels' in config
+
+        if is_whisper:
+            spec_layer = BirdNETMelSpecLayer(n_mels=config.get('n_mels', 80)).to(device)
+            backbone = WhisperBackbone(
+                n_mels=config.get('n_mels', 80),
+                d_model=config.get('d_model', 512),
+                n_heads=config.get('n_heads', 8),
+                n_layers=config.get('n_layers', 6),
+                emb_size=config.get('emb_size', 1024)
+            ).to(device)
+        else:
+            # Fallback for old EfficientNet models
+            from birdnet_analyzer.torch_model import EfficientNetBackbone
+            spec_layer = BirdNETMelSpecLayer(spec_shape=(96, 511)).to(device) # Old spec layer
+            backbone = EfficientNetBackbone(2, 1024).to(device)
+
         spec_layer.eval()
         
-        backbone = EfficientNetBackbone(2, 1024).to(device)
+        # Load weights
+        if 'spec_layer' in state:
+            spec_layer.load_state_dict(state['spec_layer'])
         
-        if 'backbone.stem.0.weight' in state:
-            backbone_state = {k.replace('backbone.', ''): v for k, v in state.items() if k.startswith('backbone.')}
-            backbone.load_state_dict(backbone_state, strict=True)
-        elif 'stem.0.weight' in state:
-            backbone.load_state_dict(state, strict=True)
+        if 'backbone' in state:
+            backbone.load_state_dict(state['backbone'])
         else:
+            # Fallback for older checkpoints that are just the backbone state_dict
             backbone.load_state_dict(state, strict=False)
             
         backbone.eval()
         logger.debug("Model components loaded successfully")
     except Exception as e:
+        import traceback
+        logger.error(f"Error loading model: {e}\n{traceback.format_exc()}")
         return {"error": f"Error al cargar el modelo: {e}"}
 
     # Collect audio paths and labels
@@ -595,6 +645,16 @@ with gr.Blocks() as demo:
                     info="Directorio que contiene archivos de audio no etiquetados para preentrenamiento"
                 )
             with gr.Row():
+                pretrain_use_whisper = gr.Checkbox(label="Usar Whisper Backbone", value=True, info="Activar para preentrenar un modelo basado en Whisper")
+            
+            with gr.Group(visible=True) as whisper_params:
+                gr.Markdown("### Parámetros del Backbone Whisper")
+                with gr.Row():
+                    pretrain_d_model = gr.Number(label="Dimensión del Modelo (d_model)", value=512, info="Dimensión interna del transformer")
+                    pretrain_n_heads = gr.Number(label="Número de Cabezas (n_heads)", value=8, info="Número de cabezas de atención")
+                    pretrain_n_layers = gr.Number(label="Número de Capas (n_layers)", value=6, info="Número de bloques de transformer")
+
+            with gr.Row():
                 pretrain_epochs_input = gr.Number(
                     label="Épocas",
                     value=10,
@@ -626,9 +686,15 @@ with gr.Blocks() as demo:
                 pretrain_btn = gr.Button("Ejecutar Preentrenamiento")
                 pretrain_stop_btn = gr.Button("Detener Preentrenamiento")
 
+            pretrain_use_whisper.change(lambda x: gr.update(visible=x), inputs=pretrain_use_whisper, outputs=whisper_params)
+
             pretrain_event = pretrain_btn.click(
                 pretrain_interface,
-                inputs=[pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, pretrain_lr_input, pretrain_save_every_input, pretrain_output_dir_input],
+                inputs=[
+                    pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, 
+                    pretrain_lr_input, pretrain_save_every_input, pretrain_output_dir_input,
+                    pretrain_use_whisper, pretrain_d_model, pretrain_n_heads, pretrain_n_layers
+                ],
                 outputs=pretrain_output,
                 # Add request automatically by Gradio if fn accepts _request or request: gr.Request
             )
@@ -756,8 +822,8 @@ with gr.Blocks() as demo:
                     )
                     vis_model_path = gr.Textbox(
                         label="Ruta del Modelo Backbone",
-                        placeholder="pretrained_backbone.pt",
-                        info="Ruta al archivo del backbone preentrenado"
+                        placeholder="pretrained_backbone_complete.pt",
+                        info="Ruta al archivo del backbone preentrenado (ej. whisper_pretrained_backbone_complete.pt)"
                     )
                     vis_n_samples = gr.Slider(
                         minimum=50, maximum=2000, step=50, value=500,

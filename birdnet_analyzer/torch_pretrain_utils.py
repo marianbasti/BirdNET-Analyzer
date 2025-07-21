@@ -5,7 +5,7 @@ import torchaudio
 import random
 import os
 from torch.utils.data import Dataset, DataLoader
-from birdnet_analyzer.torch_model import BirdNetTorchModel, EfficientNetBackbone, BirdNETMelSpecLayer
+from birdnet_analyzer.torch_model import BirdNetTorchModel, WhisperBackbone, BirdNETMelSpecLayer
 
 # 1. Audio Augmentation for Contrastive Learning
 class AudioAugment:
@@ -109,12 +109,18 @@ class NTXentLoss(nn.Module):
 
 # 5. Pretraining Loop
 class SimCLRPretrainer:
-    def __init__(self, emb_size=1024, proj_dim=128, spec_shape=(96, 511), device='cuda', seed=42, log_wandb=False, run_name=None):
+    def __init__(self, emb_size=1024, proj_dim=128, n_mels=80, d_model=512, n_heads=8, n_layers=6, device='cuda', seed=42, log_wandb=False, run_name=None):
         import numpy as np
         import random
         self.device = device
-        self.spec_layer = BirdNETMelSpecLayer(spec_shape=spec_shape).to(device)
-        self.backbone = EfficientNetBackbone(2, emb_size).to(device)
+        self.spec_layer = BirdNETMelSpecLayer(n_mels=n_mels).to(device)
+        self.backbone = WhisperBackbone(
+            n_mels=n_mels, 
+            d_model=d_model, 
+            n_heads=n_heads, 
+            n_layers=n_layers, 
+            emb_size=emb_size
+        ).to(device)
         self.proj_head = ProjectionHead(emb_size, proj_dim).to(device)
         self.loss_fn = NTXentLoss()
         self.log_wandb = log_wandb
@@ -127,7 +133,15 @@ class SimCLRPretrainer:
             torch.cuda.manual_seed_all(seed)
         if self.log_wandb:
             import wandb
-            wandb.init(project="birdnet-pretrain", name=run_name, config={"emb_size": emb_size, "proj_dim": proj_dim, "spec_shape": spec_shape, "seed": seed})
+            wandb.init(project="birdnet-pretrain", name=run_name, config={
+                "emb_size": emb_size, 
+                "proj_dim": proj_dim, 
+                "n_mels": n_mels,
+                "d_model": d_model,
+                "n_heads": n_heads,
+                "n_layers": n_layers,
+                "seed": seed
+            })
 
     def forward(self, x):
         x = self.spec_layer(x)
@@ -143,7 +157,10 @@ class SimCLRPretrainer:
             'proj_head': self.proj_head.state_dict(),
             'config': {
                 'emb_size': 1024,  # Assuming default
-                'spec_shape': (96, 511),
+                'n_mels': 80,
+                'd_model': 512,
+                'n_heads': 8,
+                'n_layers': 6,
                 'proj_dim': 128
             }
         }, save_path)

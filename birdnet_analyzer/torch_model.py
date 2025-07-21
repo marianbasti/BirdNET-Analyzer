@@ -2,151 +2,223 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
+import math
 
 class BirdNETMelSpecLayer(nn.Module):
     """
-    Computes two mel spectrograms as in BirdNET V2.4 and concatenates them as channels.
-    - First: fmin=0, fmax=3000, nfft=2048, hop=278, 96 mel bins
-    - Second: fmin=500, fmax=15000, nfft=1024, hop=280, 96 mel bins
-    Output: (B, 2, 96, 511)
+    Computes mel spectrogram similar to Whisper preprocessing for BirdNET.
+    Creates a single mel spectrogram with 80 mel bins (Whisper standard) instead of dual spectrograms.
+    Output: (B, 80, 3000) - matching Whisper's expected input format
     """
-    def __init__(self, sample_rate=48000, spec_shape=(96, 511), data_format='channels_first'):
+    def __init__(self, sample_rate=48000, n_mels=80, n_fft=2048, hop_length=160, data_format='channels_first'):
         super().__init__()
         self.sample_rate = sample_rate
-        self.spec_shape = spec_shape
+        self.n_mels = n_mels
         self.data_format = data_format
-        # Low frequency spectrogram
-        self.mel_low = torchaudio.transforms.MelSpectrogram(
+        
+        # Single mel spectrogram following Whisper's preprocessing
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
-            n_fft=2048,
-            win_length=2048,
-            hop_length=278,
+            n_fft=n_fft,
+            win_length=n_fft,
+            hop_length=hop_length,
             f_min=0,
-            f_max=3000,
-            n_mels=96,
+            f_max=sample_rate // 2,
+            n_mels=n_mels,
             power=2.0,
             normalized=False,
         )
-        # High frequency spectrogram
-        self.mel_high = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=1024,
-            win_length=1024,
-            hop_length=280,
-            f_min=500,
-            f_max=15000,
-            n_mels=96,
-            power=2.0,
-            normalized=False,
-        )
-        # Nonlinear scaling parameter (shared for both)
-        self.mag_scale = nn.Parameter(torch.tensor(1.23, dtype=torch.float32))
+        
+        # Whisper uses log mel spectrograms
+        self.to_db = torchaudio.transforms.AmplitudeToDB(stype='power', top_db=80)
 
     def forward(self, x):
-        # Normalize between -1 and 1
-        x = x - x.min(dim=1, keepdim=True)[0]
-        x = x / (x.max(dim=1, keepdim=True)[0] + 1e-6)
-        x = x - 0.5
-        x = x * 2.0
-        # Compute both spectrograms
-        mel_low = self.mel_low(x)  # (B, 96, T1)
-        mel_high = self.mel_high(x)  # (B, 96, T2)
-        # Ensure both have the same time dimension (511)
-        mel_low = mel_low[..., :511]
-        mel_high = mel_high[..., :511]
-        # Nonlinear scaling
-        mel_low = mel_low.pow(1.0 / (1.0 + torch.exp(self.mag_scale)))
-        mel_high = mel_high.pow(1.0 / (1.0 + torch.exp(self.mag_scale)))
-        # Flip frequency axis
-        mel_low = torch.flip(mel_low, dims=[1])
-        mel_high = torch.flip(mel_high, dims=[1])
-        # Stack as channels: (B, 2, 96, 511)
-        mel = torch.stack([mel_low, mel_high], dim=1)
-        return mel
+        # Normalize input audio
+        x = x - x.mean(dim=1, keepdim=True)
+        x = x / (x.std(dim=1, keepdim=True) + 1e-6)
+        
+        # Compute mel spectrogram
+        mel = self.mel_transform(x)  # (B, n_mels, T)
+        
+        # Convert to dB scale (log mel)
+        mel = self.to_db(mel)
+        
+        # Ensure fixed time dimension (3000 frames for 3 seconds at 48kHz with hop=160)
+        target_frames = 3000
+        if mel.shape[-1] > target_frames:
+            mel = mel[..., :target_frames]
+        elif mel.shape[-1] < target_frames:
+            pad_width = target_frames - mel.shape[-1]
+            mel = F.pad(mel, (0, pad_width))
+        
+        # Normalize the spectrogram
+        mel = (mel - mel.mean()) / (mel.std() + 1e-6)
+        
+        return mel  # (B, 80, 3000)
 
-class SqueezeExcite(nn.Module):
-    def __init__(self, in_channels, se_ratio=0.25):
+class MultiHeadAttention(nn.Module):
+    """Multi-head self-attention layer similar to Whisper's implementation."""
+    def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
-        reduced = max(1, int(in_channels * se_ratio))
-        self.fc1 = nn.Conv2d(in_channels, reduced, 1)
-        self.fc2 = nn.Conv2d(reduced, in_channels, 1)
-    def forward(self, x):
-        s = F.adaptive_avg_pool2d(x, 1)
-        s = F.relu(self.fc1(s))
-        s = torch.sigmoid(self.fc2(s))
-        return x * s
+        assert d_model % n_heads == 0
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.scale = math.sqrt(self.d_k)
+        
+    def forward(self, x, mask=None):
+        batch_size, seq_len, d_model = x.shape
+        
+        # Linear projections
+        q = self.w_q(x).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        k = self.w_k(x).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        v = self.w_v(x).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        
+        # Attention computation
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+            
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        
+        return self.w_o(attn_output)
 
-class InvertedResBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, stride, expand_ratio, se_ratio=0.25):
+class TransformerBlock(nn.Module):
+    """Transformer block similar to Whisper's encoder block."""
+    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
         super().__init__()
-        mid_ch = in_ch * expand_ratio
-        self.use_res = stride == 1 and in_ch == out_ch
-        self.expand = nn.Conv2d(in_ch, mid_ch, 1) if expand_ratio != 1 else nn.Identity()
-        self.bn0 = nn.BatchNorm2d(mid_ch)
-        self.dwconv = nn.Conv2d(mid_ch, mid_ch, 3, stride, 1, groups=mid_ch)
-        self.bn1 = nn.BatchNorm2d(mid_ch)
-        self.se = SqueezeExcite(mid_ch, se_ratio)
-        self.project = nn.Conv2d(mid_ch, out_ch, 1)
-        self.bn2 = nn.BatchNorm2d(out_ch)
-    def forward(self, x):
-        out = self.expand(x)
-        out = F.relu6(self.bn0(out))
-        out = self.dwconv(out)
-        out = F.relu6(self.bn1(out))
-        out = self.se(out)
-        out = self.project(out)
-        out = self.bn2(out)
-        if self.use_res:
-            out = out + x
-        return out
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x, mask=None):
+        # Self-attention with residual connection
+        attn_out = self.attn(x, mask)
+        x = self.norm1(x + attn_out)
+        
+        # Feed-forward with residual connection
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + ffn_out)
+        
+        return x
 
-class EfficientNetBackbone(nn.Module):
-    def __init__(self, in_ch=2, emb_size=1024):
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding similar to Whisper."""
+    def __init__(self, d_model, max_len=5000):
         super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_ch, 32, 3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU6(inplace=True)
-        )
-        self.blocks = nn.Sequential(
-            InvertedResBlock(32, 16, 1, 1),
-            InvertedResBlock(16, 24, 2, 6),
-            InvertedResBlock(24, 24, 1, 6),
-            InvertedResBlock(24, 40, 2, 6),
-            InvertedResBlock(40, 40, 1, 6),
-            InvertedResBlock(40, 80, 2, 6),
-            InvertedResBlock(80, 80, 1, 6),
-            InvertedResBlock(80, 112, 1, 6),
-            InvertedResBlock(112, 112, 1, 6),
-            InvertedResBlock(112, 192, 2, 6),
-            InvertedResBlock(192, 192, 1, 6),
-            InvertedResBlock(192, 320, 1, 6)
-        )
-        self.head = nn.Sequential(
-            nn.Conv2d(320, emb_size, 1),
-            nn.BatchNorm2d(emb_size),
-            nn.ReLU6(inplace=True)
-        )
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        
+        self.register_buffer('pe', pe)
+        
     def forward(self, x):
-        x = self.stem(x)
-        x = self.blocks(x)
-        x = self.head(x)
-        x = self.pool(x)
-        x = x.flatten(1)
+        return x + self.pe[:x.size(1), :].transpose(0, 1)
+
+class WhisperBackbone(nn.Module):
+    """
+    Whisper-style encoder backbone for audio feature extraction.
+    Takes mel spectrograms as input and produces embeddings.
+    """
+    def __init__(self, n_mels=80, d_model=512, n_heads=8, n_layers=6, d_ff=2048, emb_size=1024, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_mels = n_mels
+        
+        # Convolutional layers to reduce time dimension (similar to Whisper)
+        self.conv1 = nn.Conv1d(n_mels, d_model, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
+        
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model)
+        
+        # Transformer encoder blocks
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(d_model, n_heads, d_ff, dropout)
+            for _ in range(n_layers)
+        ])
+        
+        # Final projection to embedding size
+        self.ln_post = nn.LayerNorm(d_model)
+        self.proj = nn.Linear(d_model, emb_size)
+        
+        # Global average pooling
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        
+    def forward(self, x):
+        # x shape: (B, n_mels, T) = (B, 80, 3000)
+        
+        # Convolutional layers
+        x = F.gelu(self.conv1(x))  # (B, d_model, T)
+        x = F.gelu(self.conv2(x))  # (B, d_model, T//2)
+        
+        # Transpose for transformer: (B, T//2, d_model)
+        x = x.transpose(1, 2)
+        
+        # Add positional encoding
+        x = self.pos_encoding(x)
+        
+        # Apply transformer blocks
+        for block in self.transformer_blocks:
+            x = block(x)
+        
+        # Layer norm
+        x = self.ln_post(x)
+        
+        # Global average pooling over time dimension
+        x = x.transpose(1, 2)  # (B, d_model, T//2)
+        x = self.pool(x).squeeze(-1)  # (B, d_model)
+        
+        # Final projection
+        x = self.proj(x)  # (B, emb_size)
+        
         return x
 
 class BirdNetTorchModel(nn.Module):
-    def __init__(self, num_classes, emb_size=1024, spec_shape=(96, 511)):
+    def __init__(self, num_classes, emb_size=1024, n_mels=80, d_model=512, n_heads=8, n_layers=6):
         super().__init__()
-        self.spec_layer = BirdNETMelSpecLayer(spec_shape=spec_shape)
-        self.backbone = EfficientNetBackbone(2, emb_size)
+        self.spec_layer = BirdNETMelSpecLayer(n_mels=n_mels)
+        self.backbone = WhisperBackbone(
+            n_mels=n_mels, 
+            d_model=d_model, 
+            n_heads=n_heads, 
+            n_layers=n_layers, 
+            emb_size=emb_size
+        )
         self.classifier = nn.Linear(emb_size, num_classes)
+        
     def forward(self, x):
         try:
-            x = self.spec_layer(x)  # (B, 2, 96, 511)
-            x = self.backbone(x)
-            x = self.classifier(x)
+            x = self.spec_layer(x)  # (B, 80, 3000)
+            x = self.backbone(x)    # (B, emb_size)
+            x = self.classifier(x)  # (B, num_classes)
             return x
         except RuntimeError as e:
             import torch
@@ -158,4 +230,3 @@ class BirdNetTorchModel(nn.Module):
             else:
                 raise
 
-# Training and inference utilities would be implemented here as well.
