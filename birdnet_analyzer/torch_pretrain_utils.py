@@ -5,7 +5,7 @@ import torchaudio
 import random
 import os
 from torch.utils.data import Dataset, DataLoader
-from birdnet_analyzer.torch_model import BirdNetTorchModel, EfficientNetBackbone, BirdNETMelSpecLayer
+from birdnet_analyzer.torch_model import DeltaNet, BioacousticMelSpecLayer
 
 # 1. Audio Augmentation for Contrastive Learning
 class AudioAugment:
@@ -109,13 +109,13 @@ class NTXentLoss(nn.Module):
 
 # 5. Pretraining Loop
 class SimCLRPretrainer:
-    def __init__(self, emb_size=1024, proj_dim=128, spec_shape=(96, 511), device='cuda', seed=42, log_wandb=False, run_name=None):
+    def __init__(self, emb_size=192, proj_dim=128, spec_shape=(96, 511), device='cuda', seed=42, log_wandb=False, run_name=None):
         import numpy as np
         import random
         self.device = device
-        self.spec_layer = BirdNETMelSpecLayer(spec_shape=spec_shape).to(device)
-        self.backbone = EfficientNetBackbone(2, emb_size).to(device)
-        self.proj_head = ProjectionHead(emb_size, proj_dim).to(device)
+        # Use hidden_size=192 for mel input
+        self.backbone = DeltaNet(num_classes=emb_size, hidden_size=192).to(self.device)
+        self.proj_head = ProjectionHead(emb_size, proj_dim).to(self.device)
         self.loss_fn = NTXentLoss()
         self.log_wandb = log_wandb
         self.run_name = run_name
@@ -130,7 +130,8 @@ class SimCLRPretrainer:
             wandb.init(project="birdnet-pretrain", name=run_name, config={"emb_size": emb_size, "proj_dim": proj_dim, "spec_shape": spec_shape, "seed": seed})
 
     def forward(self, x):
-        x = self.spec_layer(x)
+        # x: waveform
+        x = x.to(self.device)  # Ensure input is on the correct device
         x = self.backbone(x)
         x = self.proj_head(x)
         return x
@@ -138,13 +139,12 @@ class SimCLRPretrainer:
     def save_for_visualization(self, save_path='pretrained_for_viz.pt'):
         """Save the complete pretraining state including spec layer for visualization."""
         torch.save({
-            'spec_layer': self.spec_layer.state_dict(),
             'backbone': self.backbone.state_dict(),
             'proj_head': self.proj_head.state_dict(),
             'config': {
-                'emb_size': 1024,  # Assuming default
+                'emb_size': self.backbone.classifier.in_features,  # Use actual emb_size
                 'spec_shape': (96, 511),
-                'proj_dim': 128
+                'proj_dim': self.proj_head.net[-1].out_features
             }
         }, save_path)
         print(f"Complete pretraining state saved to {save_path}")
@@ -153,26 +153,27 @@ class SimCLRPretrainer:
         import os
         from tqdm import tqdm
         scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
-        params = list(self.spec_layer.parameters()) + list(self.backbone.parameters()) + list(self.proj_head.parameters())
+        params = list(self.backbone.parameters()) + list(self.proj_head.parameters())
         optimizer = torch.optim.Adam(params, lr=lr)
         start_epoch = 0
         # Resume support
         if resume_from and os.path.isfile(resume_from):
             checkpoint = torch.load(resume_from, map_location=self.device)
-            self.spec_layer.load_state_dict(checkpoint['spec_layer'])
             self.backbone.load_state_dict(checkpoint['backbone'])
             self.proj_head.load_state_dict(checkpoint['proj_head'])
             optimizer.load_state_dict(checkpoint['optimizer'])
+            # Ensure models are on the correct device after loading state dicts
+            self.backbone = self.backbone.to(self.device)
+            self.proj_head = self.proj_head.to(self.device)
             start_epoch = checkpoint['epoch'] + 1
             print(f"Resumed from checkpoint {resume_from} at epoch {start_epoch}")
         for epoch in range(start_epoch, epochs):
-            self.spec_layer.train()
             self.backbone.train()
             self.proj_head.train()
             total_loss = 0
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
             for x1, x2 in pbar:
-                x1, x2 = x1.to(self.device), x2.to(self.device)
+                x1, x2 = x1.to(self.device), x2.to(self.device)  # Move batch to device
                 # Check for NaNs or large values
                 if torch.isnan(x1).any() or torch.isnan(x2).any():
                     print("[WARNING] NaN detected in input batch. Skipping batch.")
@@ -205,7 +206,6 @@ class SimCLRPretrainer:
             # Save checkpoint
             if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
                 torch.save({
-                    'spec_layer': self.spec_layer.state_dict(),
                     'backbone': self.backbone.state_dict(),
                     'proj_head': self.proj_head.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -219,6 +219,11 @@ class SimCLRPretrainer:
         self.save_for_visualization(viz_path)
         
         print(f"Pretraining complete. Backbone saved to {save_path}")
+        print(f"Complete state for visualization saved to {viz_path}")
+        if self.log_wandb:
+            import wandb
+            wandb.save(save_path)
+            wandb.save(viz_path)
         print(f"Complete state for visualization saved to {viz_path}")
         if self.log_wandb:
             import wandb

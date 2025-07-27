@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.functional import binary_cross_entropy_with_logits
-from birdnet_analyzer.torch_model import BirdNetTorchModel
+from birdnet_analyzer.torch_model import DeltaNet
 
 class AudioDataset(Dataset):
     def __init__(self, audio_data, labels):

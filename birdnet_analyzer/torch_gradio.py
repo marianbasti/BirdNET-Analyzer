@@ -6,7 +6,7 @@ def classify_interface(audio_dir, model_path, window_size_sec, hop_size_sec, thr
     import os
     import torch
     import torchaudio
-    from birdnet_analyzer.torch_model import BirdNetTorchModel
+    from birdnet_analyzer.torch_model import DeltaNet
     # Scan for audio files
     if not os.path.isdir(audio_dir):
         return {"error": "Por favor, proporciona una ruta de directorio válida."}
@@ -20,7 +20,7 @@ def classify_interface(audio_dir, model_path, window_size_sec, hop_size_sec, thr
         state = torch.load(model_path, map_location=device)
         # Try to get num_classes from classifier weight shape
         num_classes = state['classifier.weight'].shape[0] if 'classifier.weight' in state else 10
-        model = BirdNetTorchModel(num_classes=num_classes)
+        model = DeltaNet(num_classes=num_classes)
         model.load_state_dict(state)
         model = model.to(device)
         model.eval()
@@ -88,7 +88,7 @@ import io
 import gradio as gr
 import torch
 import torchaudio
-from birdnet_analyzer.torch_model import BirdNetTorchModel
+from birdnet_analyzer.torch_model import DeltaNet
 from birdnet_analyzer.torch_pretrain_utils import SimCLRPretrainer, UnlabeledAudioDataset, collate_fn
 
 # Add request: gr.Request to function signature
@@ -112,15 +112,10 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
         if output_dir is not None and output_dir != "":
             os.makedirs(output_dir, exist_ok=True)
             save_path = os.path.join(output_dir, 'pretrained_backbone.pt')
-            checkpoint_prefix = os.path.join(output_dir, 'checkpoint_pretrain_epoch')
         else:
             save_path = 'pretrained_backbone.pt'
-            checkpoint_prefix = 'checkpoint_pretrain_epoch'
-        # Try to call with checkpoint_prefix if supported
-        try:
-            pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs), checkpoint_prefix=checkpoint_prefix)
-        except TypeError:
-            pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
+        # Remove checkpoint_prefix argument
+        pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -159,7 +154,7 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
     # Load model
     try:
-        model = BirdNetTorchModel(num_classes=len(class_names))
+        model = DeltaNet(num_classes=len(class_names))
         if model_path is not None:
             try:
                 state = torch.load(model_path, map_location=device)
@@ -257,7 +252,7 @@ def eval_interface(data_dir, model_path):
     # Select device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     try:
-        model = BirdNetTorchModel(num_classes=len(class_names))
+        model = DeltaNet(num_classes=len(class_names))
         model.load_state_dict(torch.load(model_path, map_location=device))
         model = model.to(device)
         model.eval()
@@ -308,7 +303,7 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
     """Extract and cache features to avoid recomputation when only changing visualization parameters."""
     import torch
     import torchaudio
-    from birdnet_analyzer.torch_model import EfficientNetBackbone, BirdNETMelSpecLayer
+    from birdnet_analyzer.torch_model import DeltaNet
     import os
     import numpy as np
     
@@ -331,27 +326,16 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    # Load model components
+
+    # Load model (use full DeltaNet, not just backbone)
     try:
-        logger.debug(f"Loading model components from {model_path}")
+        logger.debug(f"Loading model from {model_path}")
         state = torch.load(model_path, map_location=device)
-        
-        spec_layer = BirdNETMelSpecLayer().to(device)
-        spec_layer.eval()
-        
-        backbone = EfficientNetBackbone(2, 1024).to(device)
-        
-        if 'backbone.stem.0.weight' in state:
-            backbone_state = {k.replace('backbone.', ''): v for k, v in state.items() if k.startswith('backbone.')}
-            backbone.load_state_dict(backbone_state, strict=True)
-        elif 'stem.0.weight' in state:
-            backbone.load_state_dict(state, strict=True)
-        else:
-            backbone.load_state_dict(state, strict=False)
-            
-        backbone.eval()
-        logger.debug("Model components loaded successfully")
+        # Infer number of classes from state dict if possible
+        num_classes = state['classifier.weight'].shape[0] if 'classifier.weight' in state else 10
+        model = DeltaNet(num_classes=num_classes).to(device)
+        model.load_state_dict(state, strict=False)
+        model.eval()
     except Exception as e:
         return {"error": f"Error al cargar el modelo: {e}"}
 
@@ -389,11 +373,21 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
                     waveform = waveform[0]
                 waveform = pad_or_truncate(waveform, 2880000)
                 waveform = waveform.unsqueeze(0).to(device)
-                
-                spec = spec_layer(waveform)
-                emb = backbone(spec)
-                emb_normalized = torch.nn.functional.normalize(emb, dim=1)
-                
+                # Forward through full model, get penultimate layer
+                # Get features before classifier
+                o = model.spec_layer(waveform)  # (B, 2, 96, T)
+                B, C, F, T = o.shape
+                mel_seq = o.permute(0, 3, 1, 2).reshape(B, T, C * F)
+                q_in = model.q_proj(mel_seq)
+                k_in = model.k_proj(mel_seq)
+                v_in = model.v_proj(mel_seq)
+                q_in, _ = model.q_conv1d(q_in)
+                k_in, _ = model.k_conv1d(k_in)
+                v_in, _ = model.v_conv1d(v_in)
+                q = q_in
+                # Pool over time axis (mean pooling)
+                pooled = q.mean(dim=1)
+                emb_normalized = torch.nn.functional.normalize(pooled, dim=1)
                 features.append(emb_normalized.cpu().numpy()[0])
                 y_labels.append(label)
             except Exception as e:
