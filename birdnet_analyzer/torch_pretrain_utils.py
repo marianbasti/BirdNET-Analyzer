@@ -43,7 +43,36 @@ class UnlabeledAudioDataset(Dataset):
         return len(self.audio_paths)
     def __getitem__(self, idx):
         path = self.audio_paths[idx]
-        waveform, sr = torchaudio.load(path)
+        waveform = None
+        sr = None
+        try:
+            waveform, sr = torchaudio.load(path)
+        except Exception as e:
+            # Try fallback with soundfile if available
+            try:
+                import soundfile as sf
+                data, sr = sf.read(path)
+                waveform = torch.tensor(data, dtype=torch.float32)
+                if waveform.ndim > 1:
+                    waveform = waveform[:, 0]  # mono
+                waveform = waveform.flatten()
+            except ImportError:
+                print(f"[WARNING] soundfile not installed. Install with 'pip install soundfile' for fallback loading.")
+            except Exception as e2:
+                print(f"[WARNING] Skipping file {path}: {e} | soundfile error: {e2}")
+                # Try a random other file, but avoid infinite recursion
+                for _ in range(5):
+                    new_idx = random.randint(0, len(self.audio_paths) - 1)
+                    if new_idx != idx:
+                        try:
+                            return self.__getitem__(new_idx)
+                        except Exception:
+                            continue
+                min_samples = int(self.min_len * self.sample_rate)
+                return torch.zeros(min_samples), torch.zeros(min_samples)
+        if waveform is None or sr is None:
+            min_samples = int(self.min_len * self.sample_rate)
+            return torch.zeros(min_samples), torch.zeros(min_samples)
         if sr != self.sample_rate:
             waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
         if waveform.ndim > 1:

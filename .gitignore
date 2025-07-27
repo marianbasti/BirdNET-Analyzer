@@ -2,7 +2,7 @@
 uv.lock
 
 # IDE/Editor settings
-.vscode/*
+.vscode/
 
 # Allow VSCode recommendations
 !.vscode/extensions.json
@@ -181,3 +181,5 @@ BirdNET_analysis_params.csv
 
 # Build files
 entitlements.plist
+
+data/
