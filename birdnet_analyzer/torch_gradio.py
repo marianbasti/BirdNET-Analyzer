@@ -144,8 +144,6 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
     # Select device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-
-
     # Scan subdirectories for classes
     if not os.path.isdir(data_dir):
         return {"error": "Por favor, proporciona una ruta de directorio válida."}
@@ -162,9 +160,10 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
                 try:
                     model.load_state_dict(state)
                 except Exception as e:
-                    # If failed, try loading as backbone only
-                    if hasattr(model, 'backbone'):
-                        model.backbone.load_state_dict(state, strict=False)
+                    # If failed, try loading as backbone only (pretraining checkpoint)
+                    if isinstance(state, dict) and "backbone" in state:
+                        # Load backbone weights into model
+                        model.load_state_dict(state["backbone"], strict=False)
                         print("Se cargaron los pesos del backbone para el fine-tuning.")
                     else:
                         raise e
@@ -864,4 +863,5 @@ with gr.Blocks() as demo:
                 )
 
 if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0")
     demo.launch(server_name="0.0.0.0")
