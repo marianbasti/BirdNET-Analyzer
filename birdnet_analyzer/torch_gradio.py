@@ -134,15 +134,18 @@ def pad_or_truncate(waveform, target_length=2880000):
 
 
 # Add request: gr.Request to function signature
-def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None): # Added request
+def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
     import os
     import numpy as np
     import torch
     from torch.utils.data import DataLoader, Dataset
     from birdnet_analyzer.torch_train_utils import AudioDataset, train_model
     import torchaudio
+    import logging
     # Select device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
 
     # Scan subdirectories for classes
     if not os.path.isdir(data_dir):
@@ -152,23 +155,40 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
     # Load model
     try:
-        model = DeltaNet(num_classes=len(class_names))
+        model = None
         if model_path is not None:
             try:
                 state = torch.load(model_path, map_location=device)
-                # Try to load as full model first
-                try:
-                    model.load_state_dict(state)
-                except Exception as e:
-                    # If failed, try loading as backbone only (pretraining checkpoint)
-                    if isinstance(state, dict) and "backbone" in state:
-                        # Load backbone weights into model
-                        model.load_state_dict(state["backbone"], strict=False)
-                        print("Se cargaron los pesos del backbone para el fine-tuning.")
-                    else:
-                        raise e
+                # --- Robust checkpoint loading with hidden_size adaptation ---
+                if isinstance(state, dict) and "backbone" in state:
+                    backbone_state = state["backbone"]
+                    hidden_size = _infer_hidden_size_from_backbone_state(backbone_state)
+                    model = DeltaNet(num_classes=len(class_names), hidden_size=hidden_size)
+                    # Remove classifier weights if present in backbone_state
+                    backbone_state = {k: v for k, v in backbone_state.items() if not k.startswith("classifier.")}
+                    model.load_state_dict(backbone_state, strict=False)
+                    # Replace classifier for correct output dim
+                    model.classifier = torch.nn.Linear(model.classifier.in_features, len(class_names)).to(device)
+                    print(f"Se cargaron los pesos del backbone para el fine-tuning (SimCLR checkpoint, hidden_size={hidden_size}).")
+                elif isinstance(state, dict) and any(k.startswith("classifier.") for k in state.keys()):
+                    model = DeltaNet(num_classes=len(class_names))
+                    try:
+                        model.load_state_dict(state, strict=True)
+                    except RuntimeError as e:
+                        print(f"Advertencia: {e}")
+                        # Remove classifier weights from state dict before loading
+                        filtered_state = {k: v for k, v in state.items() if not k.startswith("classifier.")}
+                        model.load_state_dict(filtered_state, strict=False)
+                        model.classifier = torch.nn.Linear(model.classifier.in_features, len(class_names)).to(device)
+                        print("Se re-inicializó la capa de clasificación para el número correcto de clases.")
+                else:
+                    model = DeltaNet(num_classes=len(class_names))
+                    model.load_state_dict(state, strict=False)
+                    print("Advertencia: Formato de checkpoint desconocido, se cargaron los pesos coincidentes.")
             except Exception as e:
                 return {"error": f"Error al cargar el modelo: {e}"}
+        else:
+            model = DeltaNet(num_classes=len(class_names))
         model = model.to(device)
         model.eval()
     except Exception as e:
@@ -241,6 +261,7 @@ def eval_interface(data_dir, model_path):
     import numpy as np
     import torch
     import torchaudio
+    import logging
     # Scan subdirectories for classes
     if not os.path.isdir(data_dir):
         return {"error": "Por favor, proporciona una ruta de directorio válida."}
@@ -251,8 +272,30 @@ def eval_interface(data_dir, model_path):
     # Select device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     try:
-        model = DeltaNet(num_classes=len(class_names))
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model = None
+        state = torch.load(model_path, map_location=device)
+        if isinstance(state, dict) and "backbone" in state:
+            backbone_state = state["backbone"]
+            hidden_size = _infer_hidden_size_from_backbone_state(backbone_state)
+            model = DeltaNet(num_classes=len(class_names), hidden_size=hidden_size)
+            backbone_state = {k: v for k, v in backbone_state.items() if not k.startswith("classifier.")}
+            model.load_state_dict(backbone_state, strict=False)
+            model.classifier = torch.nn.Linear(model.classifier.in_features, len(class_names)).to(device)
+            print(f"Se cargaron los pesos del backbone para la evaluación (SimCLR checkpoint, hidden_size={hidden_size}).")
+        elif isinstance(state, dict) and any(k.startswith("classifier.") for k in state.keys()):
+            model = DeltaNet(num_classes=len(class_names))
+            try:
+                model.load_state_dict(state, strict=True)
+            except RuntimeError as e:
+                print(f"Advertencia: {e}")
+                filtered_state = {k: v for k, v in state.items() if not k.startswith("classifier.")}
+                model.load_state_dict(filtered_state, strict=False)
+                model.classifier = torch.nn.Linear(model.classifier.in_features, len(class_names)).to(device)
+                print("Se re-inicializó la capa de clasificación para el número correcto de clases.")
+        else:
+            model = DeltaNet(num_classes=len(class_names))
+            model.load_state_dict(state, strict=False)
+            print("Advertencia: Formato de checkpoint desconocido, se cargaron los pesos coincidentes.")
         model = model.to(device)
         model.eval()
     except Exception as e:
@@ -862,6 +905,18 @@ with gr.Blocks() as demo:
                     outputs=tsne_img
                 )
 
+def _infer_hidden_size_from_backbone_state(backbone_state):
+    """
+    Infer the hidden_size used in the backbone checkpoint.
+    Looks for q_proj.weight or v_proj.weight or o_proj.weight.
+    """
+    if "q_proj.weight" in backbone_state:
+        return backbone_state["q_proj.weight"].shape[0]
+    for k in ["v_proj.weight", "o_proj.weight"]:
+        if k in backbone_state:
+            return backbone_state[k].shape[0]
+    # Fallback default
+    return 192
+
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0")
     demo.launch(server_name="0.0.0.0")

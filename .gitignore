@@ -183,3 +183,5 @@ BirdNET_analysis_params.csv
 entitlements.plist
 
 data/
+
+checkpoint_*
