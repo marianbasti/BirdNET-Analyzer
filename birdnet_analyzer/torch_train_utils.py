@@ -142,3 +142,16 @@ def predict(model, x, device='cuda'):
         x = x.to(device)
         logits = model(x)
         return torch.sigmoid(logits)
+
+def _infer_hidden_size_from_backbone_state(backbone_state):
+    """
+    Infer the hidden_size used in the backbone checkpoint.
+    Looks for q_proj.weight or v_proj.weight or o_proj.weight.
+    """
+    if "q_proj.weight" in backbone_state:
+        return backbone_state["q_proj.weight"].shape[0]
+    for k in ["v_proj.weight", "o_proj.weight"]:
+        if k in backbone_state:
+            return backbone_state[k].shape[0]
+    # Fallback default
+    return None

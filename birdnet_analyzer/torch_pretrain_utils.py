@@ -138,13 +138,25 @@ class NTXentLoss(nn.Module):
 
 # 5. Pretraining Loop
 class SimCLRPretrainer:
-    def __init__(self, emb_size=192, proj_dim=128, spec_shape=(96, 511), device='cuda', seed=42, log_wandb=False, run_name=None):
+    def __init__(
+        self,
+        emb_size=192,
+        proj_dim=128,
+        spec_shape=(96, 511),
+        device='cuda',
+        seed=42,
+        log_wandb=False,
+        run_name=None,
+        hidden_size=None
+    ):
         import numpy as np
         import random
         self.device = device
-        # Use hidden_size=192 for mel input
-        self.backbone = DeltaNet(num_classes=emb_size, hidden_size=192).to(self.device)
-        self.proj_head = ProjectionHead(emb_size, proj_dim).to(self.device)
+        # --- Use hidden_size if provided, else emb_size ---
+        if hidden_size is None:
+            hidden_size = emb_size
+        self.backbone = DeltaNet(num_classes=emb_size, hidden_size=int(hidden_size)).to(self.device)
+        self.proj_head = ProjectionHead(int(emb_size), int(proj_dim)).to(self.device)
         self.loss_fn = NTXentLoss()
         self.log_wandb = log_wandb
         self.run_name = run_name
