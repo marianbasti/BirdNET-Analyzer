@@ -107,3 +107,4 @@ urllib3==2.4.0
 uvicorn==0.34.3
 watchdog==6.0.0
 websockets==15.0.1
+trackio

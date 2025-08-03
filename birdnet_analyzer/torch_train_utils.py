@@ -29,7 +29,7 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cud
         scheduler = None
     start_epoch = 0
     if log_wandb:
-        import wandb
+        import trackio as wandb
         wandb.init(project="birdnet-finetune", name=run_name)
         wandb.watch(model)
     # Resume support

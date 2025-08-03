@@ -43,7 +43,11 @@ class UnlabeledAudioDataset(Dataset):
         return len(self.audio_paths)
     def __getitem__(self, idx):
         path = self.audio_paths[idx]
-        waveform, sr = torchaudio.load(path)
+        try:
+            waveform, sr = torchaudio.load(path)
+        except Exception as e:
+            print(f"[WARNING] Failed to load audio file: {path} ({e}). Skipping.")
+            return None  # Return None instead of raising
         if sr != self.sample_rate:
             waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
         if waveform.ndim > 1:
@@ -65,6 +69,10 @@ class UnlabeledAudioDataset(Dataset):
         return aug1, aug2
 
 def collate_fn(batch):
+    # Filter out None samples (failed loads)
+    batch = [b for b in batch if b is not None]
+    if len(batch) == 0:
+        return None, None
     # Pad to max length in batch
     x1, x2 = zip(*batch)
     maxlen = max([a.shape[-1] for a in x1 + x2])
@@ -109,7 +117,7 @@ class NTXentLoss(nn.Module):
 
 # 5. Pretraining Loop
 class SimCLRPretrainer:
-    def __init__(self, emb_size=1024, proj_dim=128, n_mels=80, d_model=512, n_heads=8, n_layers=6, device='cuda', seed=42, log_wandb=False, run_name=None):
+    def __init__(self, emb_size=1024, proj_dim=128, n_mels=80, d_model=512, n_heads=8, n_layers=6, device='cuda', seed=42, log_wandb=True, run_name=None, log_every=1, log_on='epoch'):
         import numpy as np
         import random
         self.device = device
@@ -125,6 +133,8 @@ class SimCLRPretrainer:
         self.loss_fn = NTXentLoss()
         self.log_wandb = log_wandb
         self.run_name = run_name
+        self.log_every = log_every
+        self.log_on = log_on
         # Set seeds for reproducibility
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -133,14 +143,16 @@ class SimCLRPretrainer:
             torch.cuda.manual_seed_all(seed)
         if self.log_wandb:
             import wandb
-            wandb.init(project="birdnet-pretrain", name=run_name, config={
+            wandb.init(project="birdnet-pretrain", config={
                 "emb_size": emb_size, 
                 "proj_dim": proj_dim, 
                 "n_mels": n_mels,
                 "d_model": d_model,
                 "n_heads": n_heads,
                 "n_layers": n_layers,
-                "seed": seed
+                "seed": seed,
+                "log_every": log_every,
+                "log_on": log_on
             })
 
     def forward(self, x):
@@ -182,13 +194,14 @@ class SimCLRPretrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint['epoch'] + 1
             print(f"Resumed from checkpoint {resume_from} at epoch {start_epoch}")
+        global_step = 0
         for epoch in range(start_epoch, epochs):
             self.spec_layer.train()
             self.backbone.train()
             self.proj_head.train()
             total_loss = 0
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
-            for x1, x2 in pbar:
+            for batch_idx, (x1, x2) in enumerate(pbar):
                 x1, x2 = x1.to(self.device), x2.to(self.device)
                 # Check for NaNs or large values
                 if torch.isnan(x1).any() or torch.isnan(x2).any():
@@ -214,13 +227,36 @@ class SimCLRPretrainer:
                     optimizer.step()
                 total_loss += loss.item() * x1.size(0)
                 pbar.set_postfix({"loss": loss.item()})
+                global_step += 1
+                # Log every N steps if requested
+                if self.log_wandb and self.log_on == 'step' and self.log_every > 0 and (global_step % self.log_every == 0):
+                    import wandb
+                    metrics = {
+                        "pretrain_loss": loss.item(),
+                        "epoch": epoch+1,
+                        "step": global_step,
+                        "learning_rate": optimizer.param_groups[0]['lr'],
+                    }
+                    if torch.cuda.is_available():
+                        metrics["gpu_mem_allocated_MB"] = torch.cuda.memory_allocated() // (1024 * 1024)
+                        metrics["gpu_mem_reserved_MB"] = torch.cuda.memory_reserved() // (1024 * 1024)
+                    wandb.log(metrics)
             avg_loss = total_loss / len(dataloader.dataset)
             print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}")
-            if self.log_wandb:
+            # Log every N epochs if requested
+            if self.log_wandb and self.log_on == 'epoch' and self.log_every > 0 and ((epoch + 1) % self.log_every == 0):
                 import wandb
-                wandb.log({"pretrain_loss": avg_loss, "epoch": epoch+1})
+                metrics = {
+                    "pretrain_loss": avg_loss,
+                    "epoch": epoch+1,
+                    "learning_rate": optimizer.param_groups[0]['lr'],
+                }
+                if torch.cuda.is_available():
+                    metrics["gpu_mem_allocated_MB"] = torch.cuda.memory_allocated() // (1024 * 1024)
+                    metrics["gpu_mem_reserved_MB"] = torch.cuda.memory_reserved() // (1024 * 1024)
+                wandb.log(metrics)
             # Save checkpoint
-            if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+            if checkpoint_every and checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
                 torch.save({
                     'spec_layer': self.spec_layer.state_dict(),
                     'backbone': self.backbone.state_dict(),

@@ -5,8 +5,9 @@ from birdnet_analyzer.torch_pretrain_utils import SimCLRPretrainer, UnlabeledAud
 
 def pretrain_interface(
     data_dir, epochs, batch_size, learning_rate, 
-    save_every_epochs=0, output_dir=None, 
+    save_every_epochs=1, output_dir=None, 
     use_whisper=False, d_model=512, n_heads=8, n_layers=6,
+    log_every=1, log_on="epoch",
     progress=gr.Progress(track_tqdm=True), request: gr.Request = None
 ):
     import os
@@ -31,8 +32,10 @@ def pretrain_interface(
                 d_model=int(d_model),
                 n_heads=int(n_heads),
                 n_layers=int(n_layers),
-                log_wandb=False,
-                run_name=f"whisper_pretrain_{d_model}d_{n_layers}l"
+                log_wandb=True,
+                run_name=f"whisper_pretrain_{d_model}d_{n_layers}l",
+                log_every=int(log_every),
+                log_on=log_on
             )
         else:
             print("Using EfficientNet backbone for pretraining.")

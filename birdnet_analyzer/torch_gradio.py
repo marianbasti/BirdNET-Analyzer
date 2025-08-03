@@ -50,6 +50,18 @@ with gr.Blocks() as demo:
                     info="Magnitud de los pasos de actualización de los pesos"
                 )
             with gr.Row():
+                pretrain_log_every_input = gr.Number(
+                    label="Log every (N)",
+                    value=1,
+                    info="Frecuencia para registrar métricas en wandb (cada N pasos o épocas)"
+                )
+                pretrain_log_on_input = gr.Dropdown(
+                    choices=["epoch", "step"],
+                    value="epoch",
+                    label="Log on",
+                    info="Registrar métricas cada N épocas o pasos"
+                )
+            with gr.Row():
                 pretrain_save_every_input = gr.Number(
                     label="Guardar Punto de Control Cada N Épocas (0=desactivado/solo final)",
                     value=0,
@@ -72,7 +84,8 @@ with gr.Blocks() as demo:
                 inputs=[
                     pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, 
                     pretrain_lr_input, pretrain_save_every_input, pretrain_output_dir_input,
-                    pretrain_use_whisper, pretrain_d_model, pretrain_n_heads, pretrain_n_layers
+                    pretrain_use_whisper, pretrain_d_model, pretrain_n_heads, pretrain_n_layers,
+                    pretrain_log_every_input, pretrain_log_on_input
                 ],
                 outputs=pretrain_output,
                 # Add request automatically by Gradio if fn accepts _request or request: gr.Request
