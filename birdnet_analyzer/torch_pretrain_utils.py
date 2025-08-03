@@ -43,7 +43,11 @@ class UnlabeledAudioDataset(Dataset):
         return len(self.audio_paths)
     def __getitem__(self, idx):
         path = self.audio_paths[idx]
-        waveform, sr = torchaudio.load(path)
+        try:
+            waveform, sr = torchaudio.load(path)
+        except Exception as e:
+            print(f"[WARNING] Skipping file {path}: {e}")
+            return self[random.randint(0, len(self) - 1)]  # Return a random valid sample
         if sr != self.sample_rate:
             waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
         if waveform.ndim > 1:
