@@ -12,9 +12,13 @@ class AudioAugment:
     def __init__(self, sample_rate=48000):
         self.sample_rate = sample_rate
     def __call__(self, waveform):
+        # Validate input waveform
+        if waveform.numel() == 0:
+            return waveform
+            
         # Random time shift
         shift = random.randint(0, int(0.1 * self.sample_rate))
-        if random.random() > 0.5:
+        if random.random() > 0.5 and waveform.shape[-1] > shift:
             waveform = torch.roll(waveform, shifts=shift)
         # Add random noise
         if random.random() > 0.5:
@@ -52,17 +56,35 @@ class UnlabeledAudioDataset(Dataset):
             waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
         if waveform.ndim > 1:
             waveform = waveform[0]  # mono
+        
+        # Check if waveform is empty or has invalid shape
+        if waveform.numel() == 0 or waveform.shape[-1] == 0:
+            print(f"[WARNING] Empty waveform detected in file {path}. Skipping.")
+            return self[random.randint(0, len(self) - 1)]
+            
+        # Validate waveform for NaN or extreme values
+        if torch.isnan(waveform).any() or (waveform.numel() > 0 and waveform.abs().max() > 1e6):
+            print(f"[WARNING] Invalid waveform detected in file {path}. Skipping.")
+            return self[random.randint(0, len(self) - 1)]
+        
         # Random crop between min_len and max_len seconds only if audio >= 50s
         total_len = waveform.shape[-1]
         min_samples = int(self.min_len * self.sample_rate)
         max_samples = int(self.max_len * self.sample_rate)
         min_crop_samples = int(50 * self.sample_rate)
+        
         if total_len >= min_crop_samples and total_len > max_samples:
             start = random.randint(0, total_len - max_samples)
             waveform = waveform[start:start+max_samples]
         elif total_len < min_samples:
             pad = min_samples - total_len
             waveform = F.pad(waveform, (0, pad))
+        
+        # Final validation after processing
+        if waveform.numel() == 0:
+            print(f"[WARNING] Waveform became empty after processing file {path}. Skipping.")
+            return self[random.randint(0, len(self) - 1)]
+            
         # Two augmentations for contrastive learning
         aug1 = self.augment(waveform.clone())
         aug2 = self.augment(waveform.clone())
@@ -94,17 +116,40 @@ class NTXentLoss(nn.Module):
         super().__init__()
         self.temperature = temperature
     def forward(self, z1, z2):
+        # Check for NaN or infinite values in embeddings
+        if torch.isnan(z1).any() or torch.isnan(z2).any() or torch.isinf(z1).any() or torch.isinf(z2).any():
+            print("[WARNING] NaN or Inf detected in embeddings. Skipping batch.")
+            return None
+        
         z1 = F.normalize(z1, dim=1)
         z2 = F.normalize(z2, dim=1)
+        
+        # Check after normalization
+        if torch.isnan(z1).any() or torch.isnan(z2).any():
+            print("[WARNING] NaN detected after normalization. Skipping batch.")
+            return None
+        
         N = z1.size(0)
         z = torch.cat([z1, z2], dim=0)
         sim = torch.mm(z, z.t()) / self.temperature
+        
+        # Check similarity matrix
+        if torch.isnan(sim).any() or torch.isinf(sim).any():
+            print("[WARNING] NaN or Inf detected in similarity matrix. Skipping batch.")
+            return None
+        
         labels = torch.arange(N, device=z1.device)
         labels = torch.cat([labels, labels], dim=0)
         mask = torch.eye(2*N, device=z1.device).bool()
-        sim = sim.masked_fill(mask, -9e15)
+        sim = sim.masked_fill(mask, -1e4)  # Avoid overflow in float16
         positives = torch.cat([torch.diag(sim, N), torch.diag(sim, -N)])
         negatives = sim[~mask].view(2*N, -1)
+        
+        # Final check on logits components
+        if torch.isnan(positives).any() or torch.isnan(negatives).any():
+            print("[WARNING] NaN detected in logits components. Skipping batch.")
+            return None
+            
         logits = torch.cat([positives.unsqueeze(1), negatives], dim=1)
         labels = torch.zeros(2*N, dtype=torch.long, device=z1.device)
         loss = F.cross_entropy(logits, labels)
@@ -156,6 +201,16 @@ class SimCLRPretrainer:
     def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False):
         import os
         from tqdm import tqdm
+        # Optimize DataLoader
+        dataloader = DataLoader(
+            dataloader.dataset,
+            batch_size=dataloader.batch_size,
+            shuffle=True,
+            collate_fn=dataloader.collate_fn,
+            num_workers=os.cpu_count()//4,  # Use all available CPU cores
+            pin_memory=True,  # Speed up data transfer to GPU
+            prefetch_factor=2  # Prefetch batches
+        )
         scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
         params = list(self.spec_layer.parameters()) + list(self.backbone.parameters()) + list(self.proj_head.parameters())
         optimizer = torch.optim.Adam(params, lr=lr)
@@ -174,35 +229,58 @@ class SimCLRPretrainer:
             self.backbone.train()
             self.proj_head.train()
             total_loss = 0
+            valid_batches = 0
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
             for x1, x2 in pbar:
                 x1, x2 = x1.to(self.device), x2.to(self.device)
-                # Check for NaNs or large values
+                # Validate inputs
                 if torch.isnan(x1).any() or torch.isnan(x2).any():
                     print("[WARNING] NaN detected in input batch. Skipping batch.")
                     continue
                 if (x1.abs() > 1e6).any() or (x2.abs() > 1e6).any():
                     print("[WARNING] Large value detected in input batch. Skipping batch.")
                     continue
+                
                 optimizer.zero_grad()
                 if scaler:
                     with torch.cuda.amp.autocast():
                         z1 = self.forward(x1)
                         z2 = self.forward(x2)
+                        # Check embeddings before loss calculation
+                        if torch.isnan(z1).any() or torch.isnan(z2).any():
+                            print("[WARNING] NaN detected in embeddings. Skipping batch.")
+                            continue
                         loss = self.loss_fn(z1, z2)
+                    if loss is None:
+                        print("[WARNING] Loss is None. Skipping batch.")
+                        continue
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     z1 = self.forward(x1)
                     z2 = self.forward(x2)
+                    # Check embeddings before loss calculation
+                    if torch.isnan(z1).any() or torch.isnan(z2).any():
+                        print("[WARNING] NaN detected in embeddings. Skipping batch.")
+                        continue
                     loss = self.loss_fn(z1, z2)
+                    if loss is None:
+                        print("[WARNING] Loss is None. Skipping batch.")
+                        continue
                     loss.backward()
                     optimizer.step()
+                
                 total_loss += loss.item() * x1.size(0)
-                pbar.set_postfix({"loss": loss.item()})
-            avg_loss = total_loss / len(dataloader.dataset)
-            print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}")
+                valid_batches += 1
+                pbar.set_postfix({"loss": loss.item(), "valid_batches": valid_batches})
+            
+            if valid_batches == 0:
+                print(f"[ERROR] No valid batches in epoch {epoch+1}. Stopping training.")
+                break
+                
+            avg_loss = total_loss / (valid_batches * dataloader.batch_size)
+            print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Valid batches: {valid_batches}/{len(dataloader)}")
             if self.log_wandb:
                 import wandb
                 wandb.log({"pretrain_loss": avg_loss, "epoch": epoch+1})

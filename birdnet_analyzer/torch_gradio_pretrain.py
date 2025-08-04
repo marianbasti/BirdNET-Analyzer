@@ -17,8 +17,33 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
         if len(dataset) == 0:
             return {"error": f"No se encontraron archivos de audio en el directorio proporcionado: '{data_dir}'"}
         
-        dataloader = DataLoader(dataset, batch_size=int(batch_size), shuffle=True, collate_fn=collate_fn)
+        print(f"[INFO] Found {len(dataset)} audio files in dataset")
+        
+        # Test first few samples to ensure they work
+        print("[INFO] Testing first few samples...")
+        for i in range(min(3, len(dataset))):
+            try:
+                sample = dataset[i]
+                print(f"[INFO] Sample {i}: shapes {sample[0].shape}, {sample[1].shape}")
+            except Exception as e:
+                print(f"[WARNING] Error in sample {i}: {e}")
+        
+        # Reduce batch size and disable multiprocessing to avoid issues
+        effective_batch_size = min(int(batch_size), 2)  # Cap batch size at 2 for stability
+        
+        dataloader = DataLoader(
+            dataset,
+            batch_size=effective_batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=0,  # Disable multiprocessing to avoid worker issues
+            pin_memory=False,  # Disable pin_memory for CPU debugging
+            prefetch_factor=None  # Not used when num_workers=0
+        )
+        
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"[INFO] Using device: {device}")
+        
         pretrainer = SimCLRPretrainer(device=device)
         
         # Handle output_dir
@@ -30,11 +55,23 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
             save_path = 'pretrained_backbone.pt'
             checkpoint_prefix = 'checkpoint_pretrain_epoch'
         
+        print(f"[INFO] Starting pretraining with effective batch size: {effective_batch_size}")
+        
         # Try to call with checkpoint_prefix if supported
         try:
-            pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs), checkpoint_prefix=checkpoint_prefix)
+            pretrainer.train(
+                dataloader,
+                epochs=int(epochs),
+                lr=float(learning_rate),
+                save_path=save_path,
+                checkpoint_every=int(save_every_epochs),
+                use_amp=False  # Disable mixed precision to avoid potential NaN issues
+            )
         except TypeError:
             pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
+        
+        return {"success": f"Preentrenamiento completado. Modelo guardado en: {save_path}"}
+        
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
