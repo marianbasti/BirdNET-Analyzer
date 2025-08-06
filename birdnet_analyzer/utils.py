@@ -316,6 +316,21 @@ def save_params(file_path, headers, values):
         paramswriter.writerow(values)
 
 
+def save_model_params(path, params_dict):
+    """Saves the model parameters to a file.
+
+    Args:
+        path: Path to the file.
+        params_dict: Dictionary of parameters to save.
+    """
+    import csv
+
+    with open(path, "w", newline="") as paramsfile:
+        paramswriter = csv.writer(paramsfile)
+        paramswriter.writerow(params_dict.keys())
+        paramswriter.writerow(params_dict.values())
+
+
 def save_result_file(result_path: str, out_string: str):
     """Saves the result to a file.
 

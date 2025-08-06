@@ -157,5 +157,3 @@ class BirdNetTorchModel(nn.Module):
                 raise RuntimeError("CUDA out of memory. Try reducing batch size or input size.") from e
             else:
                 raise
-
-# Training and inference utilities would be implemented here as well.

@@ -43,25 +43,27 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
     # Load model
     try:
         model = BirdNetTorchModel(num_classes=len(class_names))
-        if model_path is not None:
+        if model_path and model_path.name:
             try:
-                state = torch.load(model_path, map_location=device)
+                state = torch.load(model_path.name, map_location=device)
                 # Try to load as full model first
                 try:
                     model.load_state_dict(state)
-                except Exception as e:
-                    # If failed, try loading as backbone only
-                    if hasattr(model, 'backbone'):
-                        model.backbone.load_state_dict(state, strict=False)
-                        print("Se cargaron los pesos del backbone para el fine-tuning.")
-                    else:
-                        raise e
+                    print("Se cargó el modelo completo.")
+                except Exception:
+                    # If failed, try loading as backbone only by filtering keys
+                    backbone_state = {k.replace('backbone.', ''): v for k, v in state.items() if k.startswith('backbone.')}
+                    if not backbone_state:  # Try loading a raw backbone state dict
+                        backbone_state = state
+                    
+                    model.backbone.load_state_dict(backbone_state, strict=False)
+                    print("Se cargaron los pesos del backbone para el fine-tuning.")
+
             except Exception as e:
                 return {"error": f"Error al cargar el modelo: {e}"}
         model = model.to(device)
-        model.eval()
     except Exception as e:
-        return {"error": f"Error al cargar el modelo: {e}"}
+        return {"error": f"Error al inicializar el modelo: {e}"}
     
     # Collect all audio files and their labels
     audio_paths = []
@@ -107,7 +109,7 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
     val_loader = DataLoader(val_ds, batch_size=int(batch_size))
     
     # Handle output_dir
-    if output_dir is not None:
+    if output_dir is not None and output_dir.strip():
         os.makedirs(output_dir, exist_ok=True)
         best_model_path = os.path.join(output_dir, 'best_model.pt')
         checkpoint_prefix = os.path.join(output_dir, 'checkpoint_finetune_epoch')
@@ -116,13 +118,49 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, out
         checkpoint_prefix = 'checkpoint_finetune_epoch'
     
     try:
-        train_model(model, train_loader, val_loader, epochs=int(epochs), lr=float(learning_rate), device=device, progress=progress, best_model_path=best_model_path, checkpoint_prefix=checkpoint_prefix)
-    except TypeError:
-        train_model(model, train_loader, val_loader, epochs=int(epochs), lr=float(learning_rate), device=device, progress=progress)
+        train_model(
+            model, 
+            train_loader, 
+            val_loader, 
+            epochs=int(epochs), 
+            lr=float(learning_rate), 
+            device=device, 
+            progress=progress, 
+            best_model_path=best_model_path, 
+            checkpoint_prefix=checkpoint_prefix,
+            use_focal_loss=False,  # Can be made configurable
+            early_stopping_patience=10,
+            scheduler_type='ReduceLROnPlateau'
+        )
+    except Exception as e:
+        return {"error": f"Error durante el entrenamiento: {e}"}
 
     # After training, evaluate on val set
+    # Load best model for final evaluation
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
     val_loss, val_metrics = evaluate_model(model, val_loader, device, return_metrics=True)
-    results = {"val_loss": val_loss, "val_metrics": val_metrics, "class_names": class_names, "best_model_path": best_model_path}
+    
+    # Save training parameters
+    if output_dir and output_dir.strip():
+        from birdnet_analyzer.utils import save_model_params
+        params_dict = {
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "num_classes": len(class_names),
+            "device": device,
+            "val_loss": val_loss,
+            "val_accuracy": val_metrics['accuracy'],
+            "val_f1": val_metrics['f1']
+        }
+        save_model_params(os.path.join(output_dir, 'model_params.csv'), params_dict)
+    
+    results = {
+        "val_loss": val_loss, 
+        "val_metrics": val_metrics, 
+        "class_names": class_names, 
+        "best_model_path": best_model_path
+    }
     return results
 
 def create_finetune_tab():
