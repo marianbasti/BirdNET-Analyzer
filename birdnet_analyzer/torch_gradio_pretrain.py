@@ -4,7 +4,15 @@ import torch
 from torch.utils.data import DataLoader
 from birdnet_analyzer.torch_pretrain_utils import SimCLRPretrainer, UnlabeledAudioDataset, collate_fn
 
-def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_epochs=0, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
+def get_available_devices():
+    """Get list of available CUDA devices"""
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            devices.append(f"cuda:{i}")
+    return devices
+
+def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selection, save_every_epochs=0, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
     """Pretraining interface for self-supervised learning with SimCLR."""
     # Debug: print the received data_dir
     print(f"[DEBUG] pretrain_interface received data_dir: '{data_dir}'")
@@ -41,7 +49,7 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, save_every_e
             prefetch_factor=None  # Not used when num_workers=0
         )
         
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = device_selection if device_selection else ('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[INFO] Using device: {device}")
         
         pretrainer = SimCLRPretrainer(device=device)
@@ -108,11 +116,19 @@ def create_pretrain_tab():
             )
         
         with gr.Row():
+            pretrain_device_input = gr.Dropdown(
+                label="Dispositivo de Entrenamiento",
+                choices=get_available_devices(),
+                value=get_available_devices()[0],
+                info="Seleccione el dispositivo para entrenamiento (CPU o GPU específica)"
+            )
             pretrain_save_every_input = gr.Number(
                 label="Guardar Punto de Control Cada N Épocas (0=desactivado/solo final)",
                 value=0,
                 info="Frecuencia (en épocas) para guardar puntos de control del modelo"
             )
+        
+        with gr.Row():
             pretrain_output_dir_input = gr.Textbox(
                 label="Directorio de Salida (opcional, ej: ./pretrain_output)",
                 placeholder="Por defecto en el directorio actual",
@@ -127,7 +143,7 @@ def create_pretrain_tab():
 
         pretrain_event = pretrain_btn.click(
             pretrain_interface,
-            inputs=[pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, pretrain_lr_input, pretrain_save_every_input, pretrain_output_dir_input],
+            inputs=[pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, pretrain_lr_input, pretrain_device_input, pretrain_save_every_input, pretrain_output_dir_input],
             outputs=pretrain_output,
         )
         pretrain_stop_btn.click(

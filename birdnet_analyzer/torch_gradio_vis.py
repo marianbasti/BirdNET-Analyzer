@@ -35,7 +35,7 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
     if cache_key in _feature_cache:
         return _feature_cache[cache_key]
     
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("feature_extraction")
 
     logger.debug(f"Extracting features for: {data_dir}")
@@ -47,6 +47,7 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
         return {"error": "No se encontraron subdirectorios de clase en el directorio proporcionado."}
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.debug(f"Using device: {device}")
     
     # Load model components
     try:
@@ -103,13 +104,13 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
                 if waveform.ndim > 1:
                     waveform = waveform[0]
                 waveform = pad_or_truncate(waveform, 2880000)
-                waveform = waveform.unsqueeze(0).to(device)
+                waveform = waveform.unsqueeze(0).to(device)  # Move to GPU if available
                 
                 spec = spec_layer(waveform)
                 emb = backbone(spec)
                 emb_normalized = torch.nn.functional.normalize(emb, dim=1)
                 
-                features.append(emb_normalized.cpu().numpy()[0])
+                features.append(emb_normalized.cpu().numpy()[0])  # Move back to CPU for storage
                 y_labels.append(label)
             except Exception as e:
                 logger.warning(f"Failed to process {path}: {e}")
@@ -145,6 +146,10 @@ def extract_features_cached(data_dir, model_path, n_samples=500):
 
 def create_umap_plot(features, labels, class_names, n_neighbors=15, min_dist=0.1, metric='cosine'):
     """Create UMAP plot with given parameters."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger = logging.getLogger("UMAP")
+    logger.debug(f"Using device for UMAP: {device}")
+    
     try:
         reducer = umap.UMAP(
             n_components=2, 
@@ -183,6 +188,10 @@ def create_umap_plot(features, labels, class_names, n_neighbors=15, min_dist=0.1
 
 def create_tsne_plot(features, labels, class_names, perplexity=30, n_iter=1000, metric='cosine'):
     """Create t-SNE plot with given parameters."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger = logging.getLogger("t-SNE")
+    logger.debug(f"Using device for t-SNE: {device}")
+    
     try:
         tsne = TSNE(
             n_components=2, 

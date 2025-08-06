@@ -28,9 +28,17 @@ def list_classes(data_dir):
         return ""
     return ", ".join(class_names)
 
-def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
+def get_available_devices():
+    """Get list of available CUDA devices"""
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            devices.append(f"cuda:{i}")
+    return devices
+
+def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, device_selection, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
     """Fine-tuning interface for supervised learning."""
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = device_selection if device_selection else ('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Scan subdirectories for classes
     if not os.path.isdir(data_dir):
@@ -200,6 +208,12 @@ def create_finetune_tab():
             )
         
         with gr.Row():
+            device_input = gr.Dropdown(
+                label="Dispositivo de Entrenamiento",
+                choices=get_available_devices(),
+                value=get_available_devices()[0],
+                info="Seleccione el dispositivo para entrenamiento (CPU o GPU específica)"
+            )
             train_output_dir_input = gr.Textbox(
                 label="Directorio de Salida (opcional, ej: ./train_output)",
                 placeholder="Por defecto en el directorio actual",
@@ -214,7 +228,7 @@ def create_finetune_tab():
 
         train_event = train_btn.click(
             train_interface,
-            inputs=[train_dir_input, train_model_input, epochs_input, batch_size_input, lr_input, train_output_dir_input],
+            inputs=[train_dir_input, train_model_input, epochs_input, batch_size_input, lr_input, device_input, train_output_dir_input],
             outputs=train_output,
         )
         train_stop_btn.click(
