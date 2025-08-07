@@ -15,9 +15,36 @@ class AudioDataset(Dataset):
     def __getitem__(self, idx):
         return self.audio_data[idx], self.labels[idx]
 
-def train_model(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cuda', use_focal_loss=False, gamma=2.0, alpha=0.25, progress=None, early_stopping_patience=10, log_wandb=False, run_name=None, scheduler_type='ReduceLROnPlateau', resume_from=None, checkpoint_every=5, best_model_path='best_model.pt', checkpoint_prefix='checkpoint_finetune_epoch'):
+def train_model(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cuda', use_focal_loss=False, gamma=2.0, alpha=0.25, progress=None, early_stopping_patience=10, log_wandb=False, run_name=None, scheduler_type='ReduceLROnPlateau', resume_from=None, checkpoint_every=5, best_model_path='best_model.pt', checkpoint_prefix='checkpoint_finetune_epoch', output_dir=None):
     import os
     from tqdm import tqdm
+    import datetime
+    # Handle output_dir for all outputs
+    if output_dir is not None and output_dir.strip():
+        os.makedirs(output_dir, exist_ok=True)
+        best_model_path = os.path.join(output_dir, 'best_model.pt')
+        checkpoint_prefix = os.path.join(output_dir, 'checkpoint_finetune_epoch')
+        log_path = os.path.join(output_dir, 'finetune_log.txt')
+        params_path = os.path.join(output_dir, 'finetune_params.csv')
+    else:
+        log_path = 'finetune_log.txt'
+        params_path = 'finetune_params.csv'
+    # Logging setup
+    def log(msg):
+        ts = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        with open(log_path, "a") as f:
+            f.write(f"{ts} {msg}\n")
+    # Save params at start
+    import csv
+    params_dict = {
+        "epochs": epochs,
+        "learning_rate": lr,
+        "device": device
+    }
+    with open(params_path, "w", newline="") as paramsfile:
+        paramswriter = csv.writer(paramsfile)
+        paramswriter.writerow(params_dict.keys())
+        paramswriter.writerow(params_dict.values())
     best_val_loss = float('inf')
     best_epoch = 0
     model = model.to(device)
@@ -97,6 +124,7 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cud
             scheduler.step()
         
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_metrics['accuracy']:.4f}")
+        log(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_metrics['accuracy']:.4f}")
         
         # Logging to Weights & Biases
         if log_wandb:
@@ -135,9 +163,11 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cud
         # Early stopping check
         if patience_counter >= early_stopping_patience:
             print(f"Early stopping at epoch {epoch+1} (best epoch: {best_epoch+1})")
+            log(f"Early stopping at epoch {epoch+1} (best epoch: {best_epoch+1})")
             break
     
     print(f"Training complete. Best val loss: {best_val_loss:.4f} at epoch {best_epoch+1}")
+    log(f"Training complete. Best val loss: {best_val_loss:.4f} at epoch {best_epoch+1}")
     
     if log_wandb:
         wandb.save(best_model_path)

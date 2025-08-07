@@ -138,7 +138,8 @@ def train_interface(data_dir, model_path, epochs, batch_size, learning_rate, dev
             checkpoint_prefix=checkpoint_prefix,
             use_focal_loss=False,  # Can be made configurable
             early_stopping_patience=10,
-            scheduler_type='ReduceLROnPlateau'
+            scheduler_type='ReduceLROnPlateau',
+            output_dir=output_dir  # Pass output_dir for logs/params/checkpoints
         )
     except Exception as e:
         return {"error": f"Error durante el entrenamiento: {e}"}

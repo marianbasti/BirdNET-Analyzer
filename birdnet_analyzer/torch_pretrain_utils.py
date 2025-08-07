@@ -198,18 +198,30 @@ class SimCLRPretrainer:
         }, save_path)
         print(f"Complete pretraining state saved to {save_path}")
 
-    def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False):
+    def train(self, dataloader, epochs=20, lr=1e-3, save_path='pretrained_backbone.pt', checkpoint_every=5, resume_from=None, use_amp=False, output_dir=None):
         import os
         from tqdm import tqdm
+        import datetime
+        # Handle output_dir for all outputs
+        if output_dir is not None and output_dir.strip():
+            os.makedirs(output_dir, exist_ok=True)
+            save_path = os.path.join(output_dir, 'pretrained_backbone.pt')
+            checkpoint_prefix = os.path.join(output_dir, 'checkpoint_pretrain_epoch')
+            log_path = os.path.join(output_dir, 'pretrain_log.txt')
+            params_path = os.path.join(output_dir, 'pretrain_params.csv')
+        else:
+            checkpoint_prefix = 'checkpoint_pretrain_epoch'
+            log_path = 'pretrain_log.txt'
+            params_path = 'pretrain_params.csv'
         # Optimize DataLoader
         dataloader = DataLoader(
             dataloader.dataset,
             batch_size=dataloader.batch_size,
             shuffle=True,
             collate_fn=dataloader.collate_fn,
-            num_workers=os.cpu_count()//4,  # Use all available CPU cores
-            pin_memory=True,  # Speed up data transfer to GPU
-            prefetch_factor=2  # Prefetch batches
+            num_workers=os.cpu_count()//4,
+            pin_memory=True,
+            prefetch_factor=2
         )
         scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
         params = list(self.spec_layer.parameters()) + list(self.backbone.parameters()) + list(self.proj_head.parameters())
@@ -224,6 +236,25 @@ class SimCLRPretrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint['epoch'] + 1
             print(f"Resumed from checkpoint {resume_from} at epoch {start_epoch}")
+        # Logging setup
+        def log(msg):
+            ts = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+            with open(log_path, "a") as f:
+                f.write(f"{ts} {msg}\n")
+        # Save params at start
+        import csv
+        params_dict = {
+            "epochs": epochs,
+            "learning_rate": lr,
+            "emb_size": getattr(self, "backbone", None) and getattr(self.backbone, "head", None) and self.backbone.head[0].out_channels or 1024,
+            "proj_dim": getattr(self, "proj_head", None) and self.proj_head.net[-1].out_features or 128,
+            "spec_shape": str(getattr(self, "spec_layer", None) and self.spec_layer.spec_shape or (96, 511)),
+            "device": self.device
+        }
+        with open(params_path, "w", newline="") as paramsfile:
+            paramswriter = csv.writer(paramsfile)
+            paramswriter.writerow(params_dict.keys())
+            paramswriter.writerow(params_dict.values())
         for epoch in range(start_epoch, epochs):
             self.spec_layer.train()
             self.backbone.train()
@@ -274,34 +305,36 @@ class SimCLRPretrainer:
                 total_loss += loss.item() * x1.size(0)
                 valid_batches += 1
                 pbar.set_postfix({"loss": loss.item(), "valid_batches": valid_batches})
-            
             if valid_batches == 0:
                 print(f"[ERROR] No valid batches in epoch {epoch+1}. Stopping training.")
+                log(f"[ERROR] No valid batches in epoch {epoch+1}. Stopping training.")
                 break
-                
             avg_loss = total_loss / (valid_batches * dataloader.batch_size)
             print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Valid batches: {valid_batches}/{len(dataloader)}")
+            log(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Valid batches: {valid_batches}/{len(dataloader)}")
             if self.log_wandb:
                 import wandb
                 wandb.log({"pretrain_loss": avg_loss, "epoch": epoch+1})
             # Save checkpoint
-            if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+            if checkpoint_every and checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
                 torch.save({
                     'spec_layer': self.spec_layer.state_dict(),
                     'backbone': self.backbone.state_dict(),
                     'proj_head': self.proj_head.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch
-                }, f"checkpoint_pretrain_epoch{epoch+1}.pt")
+                }, f"{checkpoint_prefix}{epoch+1}.pt")
+                print(f"Checkpoint saved: {checkpoint_prefix}{epoch+1}.pt")
+                log(f"Checkpoint saved: {checkpoint_prefix}{epoch+1}.pt")
         # Save backbone weights
         torch.save(self.backbone.state_dict(), save_path)
-        
         # Also save complete state for visualization
         viz_path = save_path.replace('.pt', '_complete.pt')
         self.save_for_visualization(viz_path)
-        
         print(f"Pretraining complete. Backbone saved to {save_path}")
         print(f"Complete state for visualization saved to {viz_path}")
+        log(f"Pretraining complete. Backbone saved to {save_path}")
+        log(f"Complete state for visualization saved to {viz_path}")
         if self.log_wandb:
             import wandb
             wandb.save(save_path)

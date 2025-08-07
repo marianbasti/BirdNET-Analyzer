@@ -17,16 +17,31 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selec
     # Debug: print the received data_dir
     print(f"[DEBUG] pretrain_interface received data_dir: '{data_dir}'")
 
-    if not data_dir or not os.path.isdir(data_dir):
+    # Accept comma-separated list of directories
+    if not data_dir:
         return {"error": f"Por favor, proporciona una ruta de directorio válida. Recibido: '{data_dir}'"}
-    
+    dir_list = [d.strip() for d in data_dir.split(",") if d.strip()]
+    invalid_dirs = [d for d in dir_list if not os.path.isdir(d)]
+    if not dir_list or invalid_dirs:
+        return {"error": f"Por favor, proporciona rutas de directorio válidas. Recibido: '{data_dir}'. Directorios inválidos: {invalid_dirs}"}
+
     try:
-        dataset = UnlabeledAudioDataset(data_dir)
-        if len(dataset) == 0:
-            return {"error": f"No se encontraron archivos de audio en el directorio proporcionado: '{data_dir}'"}
-        
-        print(f"[INFO] Found {len(dataset)} audio files in dataset")
-        
+        # Combine datasets from all directories
+        datasets = []
+        for d in dir_list:
+            ds = UnlabeledAudioDataset(d)
+            if len(ds) > 0:
+                datasets.append(ds)
+        if not datasets or sum(len(ds) for ds in datasets) == 0:
+            return {"error": f"No se encontraron archivos de audio en los directorios proporcionados: {dir_list}"}
+        from torch.utils.data import ConcatDataset
+        if len(datasets) == 1:
+            dataset = datasets[0]
+        else:
+            dataset = ConcatDataset(datasets)
+
+        print(f"[INFO] Found {len(dataset)} audio files in dataset(s)")
+
         # Test first few samples to ensure they work
         print("[INFO] Testing first few samples...")
         for i in range(min(3, len(dataset))):
@@ -35,9 +50,9 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selec
                 print(f"[INFO] Sample {i}: shapes {sample[0].shape}, {sample[1].shape}")
             except Exception as e:
                 print(f"[WARNING] Error in sample {i}: {e}")
-        
+
         # Reduce batch size and disable multiprocessing to avoid issues
-        effective_batch_size = min(int(batch_size), 2)  # Cap batch size at 2 for stability
+        effective_batch_size = min(int(batch_size), 128)  # Cap batch size at 2 for stability
         
         dataloader = DataLoader(
             dataset,
@@ -51,7 +66,7 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selec
         
         device = device_selection if device_selection else ('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[INFO] Using device: {device}")
-        
+
         pretrainer = SimCLRPretrainer(device=device)
         
         # Handle output_dir
@@ -62,9 +77,9 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selec
         else:
             save_path = 'pretrained_backbone.pt'
             checkpoint_prefix = 'checkpoint_pretrain_epoch'
-        
+
         print(f"[INFO] Starting pretraining with effective batch size: {effective_batch_size}")
-        
+
         # Try to call with checkpoint_prefix if supported
         try:
             pretrainer.train(
@@ -77,27 +92,79 @@ def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selec
             )
         except TypeError:
             pretrainer.train(dataloader, epochs=int(epochs), lr=float(learning_rate), save_path=save_path, checkpoint_every=int(save_every_epochs))
-        
+
         return {"success": f"Preentrenamiento completado. Modelo guardado en: {save_path}"}
-        
+
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         return {"error": f"Error en el preentrenamiento: {e}\nTraceback:\n{tb}"}
 
+def eval_pretrained_backbone_interface(backbone_path):
+    """Evaluate a pretrained backbone: show structure and parameter count."""
+    import torch
+    import os
+    from birdnet_analyzer.torch_model import EfficientNetBackbone
+
+    if not backbone_path or not os.path.isfile(backbone_path):
+        return "Por favor, proporciona una ruta válida al archivo del backbone preentrenado (.pt)."
+
+    try:
+        emb_size = 1024
+        in_ch = 2
+        model = EfficientNetBackbone(in_ch=in_ch, emb_size=emb_size)
+        state_dict = torch.load(backbone_path, map_location="cpu")
+        # Handle both backbone-only and full SimCLR checkpoints
+        if isinstance(state_dict, dict) and "backbone" in state_dict:
+            # Full SimCLR checkpoint
+            model.load_state_dict(state_dict["backbone"])
+        elif isinstance(state_dict, dict) and all(k.startswith(("stem", "blocks", "head")) for k in state_dict.keys()):
+            # Backbone-only checkpoint
+            model.load_state_dict(state_dict)
+        else:
+            return (
+                "El archivo no parece ser un checkpoint de backbone válido. "
+                "Asegúrate de seleccionar un archivo .pt guardado como backbone o como checkpoint completo de preentrenamiento."
+            )
+        model.eval()
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        summary = f"Modelo EfficientNetBackbone cargado.\nTotal parámetros: {total_params:,}\nParámetros entrenables: {trainable_params:,}\n"
+        summary += f"Estructura del modelo:\n{model}"
+        return summary
+    except Exception as e:
+        import traceback
+        return f"Error al cargar o analizar el backbone: {e}\n{traceback.format_exc()}"
+
 def create_pretrain_tab():
     """Create the pretraining tab interface."""
     with gr.TabItem("Preentrenar"):
         gr.Markdown("## Preentrenamiento Auto-supervisado (SimCLR)")
-        gr.Markdown("Ingrese la ruta a un directorio que contenga archivos de audio no etiquetados (cualquier estructura de carpetas). Configure los parámetros de preentrenamiento. El backbone se guardará como 'pretrained_backbone.pt'.")
-        
+        gr.Markdown("Ingrese la ruta a uno o más directorios (separados por coma) que contengan archivos de audio no etiquetados (cualquier estructura de carpetas). Configure los parámetros de preentrenamiento. El backbone se guardará como 'pretrained_backbone.pt'.")
         with gr.Row():
             pretrain_dir_input = gr.Textbox(
-                label="Ruta del Directorio de Datos No Etiquetados",
-                placeholder="/ruta/a/datos_no_etiquetados",
-                info="Directorio que contiene archivos de audio no etiquetados para preentrenamiento"
+                label="Ruta(s) del Directorio de Datos No Etiquetados (separadas por coma)",
+                placeholder="/ruta/a/datos1, /ruta/a/datos2",
+                info="Uno o más directorios (separados por coma) que contienen archivos de audio no etiquetados para preentrenamiento"
             )
-        
+        with gr.Row():
+            pretrain_device_input = gr.Dropdown(
+                label="Dispositivo de Entrenamiento",
+                choices=get_available_devices(),
+                value=get_available_devices()[0],
+                info="Seleccione el dispositivo para entrenamiento (CPU o GPU específica)"
+            )
+            pretrain_save_every_input = gr.Number(
+                label="Guardar Punto de Control Cada N Épocas (0=desactivado/solo final)",
+                value=0,
+                info="Frecuencia (en épocas) para guardar puntos de control del modelo"
+            )
+        with gr.Row():
+            pretrain_output_dir_input = gr.Textbox(
+                label="Directorio de Salida (opcional, ej: ./pretrain_output)",
+                placeholder="Por defecto en el directorio actual",
+                info="Dónde guardar los modelos preentrenados y puntos de control"
+            )
         with gr.Row():
             pretrain_epochs_input = gr.Number(
                 label="Épocas",
@@ -113,26 +180,6 @@ def create_pretrain_tab():
                 label="Tasa de Aprendizaje",
                 value=0.001,
                 info="Magnitud de los pasos de actualización de los pesos"
-            )
-        
-        with gr.Row():
-            pretrain_device_input = gr.Dropdown(
-                label="Dispositivo de Entrenamiento",
-                choices=get_available_devices(),
-                value=get_available_devices()[0],
-                info="Seleccione el dispositivo para entrenamiento (CPU o GPU específica)"
-            )
-            pretrain_save_every_input = gr.Number(
-                label="Guardar Punto de Control Cada N Épocas (0=desactivado/solo final)",
-                value=0,
-                info="Frecuencia (en épocas) para guardar puntos de control del modelo"
-            )
-        
-        with gr.Row():
-            pretrain_output_dir_input = gr.Textbox(
-                label="Directorio de Salida (opcional, ej: ./pretrain_output)",
-                placeholder="Por defecto en el directorio actual",
-                info="Dónde guardar los modelos preentrenados y puntos de control"
             )
         
         pretrain_output = gr.Textbox(label="Estado del Preentrenamiento", interactive=False)
@@ -151,4 +198,20 @@ def create_pretrain_tab():
             None,
             pretrain_output,
             cancels=[pretrain_event]
+        )
+    with gr.TabItem("Evaluar Backbone Preentrenado"):
+        gr.Markdown("## Evaluar Backbone Preentrenado")
+        gr.Markdown("Seleccione un archivo de backbone preentrenado (.pt) para ver su estructura y el número de parámetros.")
+        with gr.Row():
+            eval_backbone_input = gr.Textbox(
+                label="Ruta al archivo backbone preentrenado (.pt)",
+                placeholder="./pretrained_backbone.pt",
+                info="Ruta al archivo .pt del backbone preentrenado"
+            )
+        eval_backbone_output = gr.Textbox(label="Resumen del Backbone", interactive=False, lines=10)
+        eval_backbone_btn = gr.Button("Evaluar Backbone")
+        eval_backbone_btn.click(
+            eval_pretrained_backbone_interface,
+            inputs=eval_backbone_input,
+            outputs=eval_backbone_output
         )
