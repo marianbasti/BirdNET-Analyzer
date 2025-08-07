@@ -219,6 +219,8 @@ def create_pretrain_tab():
                 info="Seleccione el dispositivo para entrenamiento (CPU, GPU específica o batch para múltiples GPUs)"
             )
         pretrain_tabs = gr.Tabs()
+        device_configs = {}
+
         with pretrain_tabs:
             for device in get_available_devices():
                 if device == "batch":
@@ -229,10 +231,13 @@ def create_pretrain_tab():
                         batch_size_input = gr.Number(label="Tamaño de Lote", value=8)
                         lr_input = gr.Number(label="Tasa de Aprendizaje", value=0.001)
                         save_every_input = gr.Number(label="Guardar Punto de Control Cada N Épocas", value=0)
-                    pretrain_tabs.set_event(
-                        device,
-                        {"epochs": epochs_input, "batch_size": batch_size_input, "learning_rate": lr_input, "save_every_epochs": save_every_input}
-                    )
+                    device_configs[device] = {
+                        "epochs": epochs_input,
+                        "batch_size": batch_size_input,
+                        "learning_rate": lr_input,
+                        "save_every_epochs": save_every_input
+                    }
+
         with gr.Row():
             pretrain_output_dir_input = gr.Textbox(
                 label="Directorio de Salida (opcional, ej: ./pretrain_output)",
@@ -246,7 +251,11 @@ def create_pretrain_tab():
 
         pretrain_event = pretrain_btn.click(
             pretrain_batch_interface,
-            inputs=[pretrain_dir_input, pretrain_output_dir_input, pretrain_tabs],
+            inputs=[
+                pretrain_dir_input,
+                gr.State(lambda: {device: {key: widget.value for key, widget in config.items()} for device, config in device_configs.items()}),
+                pretrain_output_dir_input
+            ],
             outputs=pretrain_output,
         )
         pretrain_stop_btn.click(
