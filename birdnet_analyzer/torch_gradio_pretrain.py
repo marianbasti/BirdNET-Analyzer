@@ -10,6 +10,7 @@ def get_available_devices():
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             devices.append(f"cuda:{i}")
+    devices.append("batch")  # Add batch option for multi-device training
     return devices
 
 def pretrain_interface(data_dir, epochs, batch_size, learning_rate, device_selection, save_every_epochs=0, output_dir=None, progress=gr.Progress(track_tqdm=True), request: gr.Request = None):
@@ -136,6 +137,69 @@ def eval_pretrained_backbone_interface(backbone_path):
         import traceback
         return f"Error al cargar o analizar el backbone: {e}\n{traceback.format_exc()}"
 
+def pretrain_batch_interface(data_dir, epochs, batch_size, learning_rate, save_every_epochs, output_dir, device_configs, progress=gr.Progress(track_tqdm=True)):
+    """Pretraining interface for batch training across multiple devices."""
+    if not data_dir:
+        return {"error": "Por favor, proporciona una ruta de directorio válida."}
+    
+    dir_list = [d.strip() for d in data_dir.split(",") if d.strip()]
+    invalid_dirs = [d for d in dir_list if not os.path.isdir(d)]
+    if not dir_list or invalid_dirs:
+        return {"error": f"Por favor, proporciona rutas de directorio válidas. Directorios inválidos: {invalid_dirs}"}
+
+    try:
+        # Combine datasets from all directories
+        datasets = []
+        for d in dir_list:
+            ds = UnlabeledAudioDataset(d)
+            if len(ds) > 0:
+                datasets.append(ds)
+        if not datasets or sum(len(ds) for ds in datasets) == 0:
+            return {"error": f"No se encontraron archivos de audio en los directorios proporcionados: {dir_list}"}
+        from torch.utils.data import ConcatDataset
+        dataset = ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
+
+        # Prepare output directory
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Launch training for each device
+        results = {}
+        for device, config in device_configs.items():
+            device_output_dir = os.path.join(output_dir, f"pretrain_{device}")
+            os.makedirs(device_output_dir, exist_ok=True)
+            save_path = os.path.join(device_output_dir, 'pretrained_backbone.pt')
+            checkpoint_prefix = os.path.join(device_output_dir, 'checkpoint_pretrain_epoch')
+
+            dataloader = DataLoader(
+                dataset,
+                batch_size=int(config["batch_size"]),
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=0,
+                pin_memory=False
+            )
+
+            pretrainer = SimCLRPretrainer(device=device)
+            try:
+                pretrainer.train(
+                    dataloader,
+                    epochs=int(config["epochs"]),
+                    lr=float(config["learning_rate"]),
+                    save_path=save_path,
+                    checkpoint_every=int(config["save_every_epochs"]),
+                    output_dir=device_output_dir
+                )
+                results[device] = f"Preentrenamiento completado en {device}. Modelo guardado en: {save_path}"
+            except Exception as e:
+                results[device] = f"Error en el preentrenamiento en {device}: {e}"
+
+        return results
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return {"error": f"Error en el preentrenamiento: {e}\nTraceback:\n{tb}"}
+
 def create_pretrain_tab():
     """Create the pretraining tab interface."""
     with gr.TabItem("Preentrenar"):
@@ -152,45 +216,37 @@ def create_pretrain_tab():
                 label="Dispositivo de Entrenamiento",
                 choices=get_available_devices(),
                 value=get_available_devices()[0],
-                info="Seleccione el dispositivo para entrenamiento (CPU o GPU específica)"
+                info="Seleccione el dispositivo para entrenamiento (CPU, GPU específica o batch para múltiples GPUs)"
             )
-            pretrain_save_every_input = gr.Number(
-                label="Guardar Punto de Control Cada N Épocas (0=desactivado/solo final)",
-                value=0,
-                info="Frecuencia (en épocas) para guardar puntos de control del modelo"
-            )
+        pretrain_tabs = gr.Tabs()
+        with pretrain_tabs:
+            for device in get_available_devices():
+                if device == "batch":
+                    continue
+                with gr.TabItem(f"Parámetros para {device}"):
+                    with gr.Row():
+                        epochs_input = gr.Number(label="Épocas", value=10)
+                        batch_size_input = gr.Number(label="Tamaño de Lote", value=8)
+                        lr_input = gr.Number(label="Tasa de Aprendizaje", value=0.001)
+                        save_every_input = gr.Number(label="Guardar Punto de Control Cada N Épocas", value=0)
+                    pretrain_tabs.set_event(
+                        device,
+                        {"epochs": epochs_input, "batch_size": batch_size_input, "learning_rate": lr_input, "save_every_epochs": save_every_input}
+                    )
         with gr.Row():
             pretrain_output_dir_input = gr.Textbox(
                 label="Directorio de Salida (opcional, ej: ./pretrain_output)",
                 placeholder="Por defecto en el directorio actual",
                 info="Dónde guardar los modelos preentrenados y puntos de control"
             )
-        with gr.Row():
-            pretrain_epochs_input = gr.Number(
-                label="Épocas",
-                value=10,
-                info="Número de épocas para entrenar el modelo"
-            )
-            pretrain_batch_size_input = gr.Number(
-                label="Tamaño de Lote",
-                value=8,
-                info="Cantidad de muestras procesadas en cada paso de entrenamiento"
-            )
-            pretrain_lr_input = gr.Number(
-                label="Tasa de Aprendizaje",
-                value=0.001,
-                info="Magnitud de los pasos de actualización de los pesos"
-            )
-        
         pretrain_output = gr.Textbox(label="Estado del Preentrenamiento", interactive=False)
-        
         with gr.Row():
             pretrain_btn = gr.Button("Ejecutar Preentrenamiento")
             pretrain_stop_btn = gr.Button("Detener Preentrenamiento")
 
         pretrain_event = pretrain_btn.click(
-            pretrain_interface,
-            inputs=[pretrain_dir_input, pretrain_epochs_input, pretrain_batch_size_input, pretrain_lr_input, pretrain_device_input, pretrain_save_every_input, pretrain_output_dir_input],
+            pretrain_batch_interface,
+            inputs=[pretrain_dir_input, pretrain_output_dir_input, pretrain_tabs],
             outputs=pretrain_output,
         )
         pretrain_stop_btn.click(
