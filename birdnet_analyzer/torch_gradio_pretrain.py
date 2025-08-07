@@ -231,12 +231,12 @@ def create_pretrain_tab():
                         batch_size_input = gr.Number(label="Tamaño de Lote", value=8)
                         lr_input = gr.Number(label="Tasa de Aprendizaje", value=0.001)
                         save_every_input = gr.Number(label="Guardar Punto de Control Cada N Épocas", value=0)
-                    device_configs[device] = {
-                        "epochs": epochs_input,
-                        "batch_size": batch_size_input,
-                        "learning_rate": lr_input,
-                        "save_every_epochs": save_every_input
-                    }
+                    device_configs[device] = [
+                        epochs_input,
+                        batch_size_input,
+                        lr_input,
+                        save_every_input
+                    ]
 
         with gr.Row():
             pretrain_output_dir_input = gr.Textbox(
@@ -249,13 +249,16 @@ def create_pretrain_tab():
             pretrain_btn = gr.Button("Ejecutar Preentrenamiento")
             pretrain_stop_btn = gr.Button("Detener Preentrenamiento")
 
+        # Collect all inputs dynamically for each device
+        def collect_inputs():
+            inputs = [pretrain_dir_input, pretrain_output_dir_input]
+            for device, widgets in device_configs.items():
+                inputs.extend(widgets)
+            return inputs
+
         pretrain_event = pretrain_btn.click(
             pretrain_batch_interface,
-            inputs=[
-                pretrain_dir_input,
-                gr.State(lambda: {device: {key: widget.value for key, widget in config.items()} for device, config in device_configs.items()}),
-                pretrain_output_dir_input
-            ],
+            inputs=collect_inputs(),
             outputs=pretrain_output,
         )
         pretrain_stop_btn.click(
